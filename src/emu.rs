@@ -1,5 +1,5 @@
 use core::fmt::Debug;
-use std::path::Path;
+use std::{io::Write, path::Path};
 
 // this is impossible to because of https://github.com/bitdefender/bddisasm/issues/82 ;(
 // use bddisasm::{operand::Operands, DecodedInstruction, OpInfo, Operand};
@@ -14,6 +14,8 @@ pub struct Emu {
     memory: MMU,
     registers: [u64; 21],
     simd_registers: [u128; 15],
+    #[cfg(debug_assertions)]
+    stack_depth: usize,
 }
 
 impl Emu {
@@ -34,6 +36,10 @@ impl Emu {
 
         macro_rules! push {
             ($expr:expr) => {
+                #[cfg(debug_assertions)]
+                {
+                    self.stack_depth += 1;
+                }
                 let sp = self.get_reg::<u64, 8>(Register::RSP) as usize;
                 self.memory
                     .write_primitive(Virtaddr(sp), $expr)
@@ -57,6 +63,8 @@ impl Emu {
             memory: MMU::new(size),
             registers: [0; 21],
             simd_registers: [0; 15],
+            #[cfg(debug_assertions)]
+            stack_depth: 0,
         }
     }
 
@@ -129,17 +137,43 @@ impl Emu {
     }
 
     /// print the stack, looking back length bytes
-    pub fn print_stack<T: Primitive<BYTES>, const BYTES: usize>(&self, length: usize) -> () {
+    pub fn print_stack<T: Primitive<BYTES>, const BYTES: usize>(&self, length: usize) -> ()
+    where
+        usize: TryFrom<T>,
+        <usize as TryFrom<T>>::Error: Debug,
+    {
         let stack_addr: usize = self.get_reg(Register::RSP);
+        println!("\x1b[1mStack:\x1b[0m");
         for i in (stack_addr..stack_addr + (length * BYTES)).step_by(BYTES) {
             let val = T::from_ne_bytes(self.memory.read_primitive(Virtaddr(i)).unwrap());
-            println!("{val:#x?}");
+            print!("\x1b[;91m    {val:#x?}");
+            // if the value resolves to an addres, read the first 8 bytes
+            // TODO: add symbolizer and resolve function addresses here
+            if let Ok(val) = self
+                .memory
+                .read_primitive::<BYTES>(Virtaddr(usize::try_from(val).unwrap()))
+            {
+                let val = T::from_ne_bytes(val);
+                println!("\x1b[0m -> \x1b[;96m{val:#x?}\x1b[0m")
+            } else {
+                println!("\x1b[0m");
+            }
         }
     }
 
     pub fn run_emu(&mut self) -> Result<(), ()> {
         'next_instr: loop {
             // we have to look ahead 16 bytes into memory since that's the maximum size of x86 instructions
+
+            #[cfg(debug_assertions)]
+            {
+                self.print_stack::<u64, 8>(self.stack_depth);
+                print!("\x1b[;96mcontinue?: \x1b[0m");
+                let _ = std::io::stdout().flush();
+                let mut str = String::new();
+                let _ = std::io::stdin().read_line(&mut str);
+                println!();
+            }
 
             // so we allocate a buffer for those on the stack here
             let mut inst_buf = [0u8; 16];
@@ -171,13 +205,27 @@ impl Emu {
             }
             macro_rules! push {
                 ($expr:expr) => {
-                    let sp = self.get_reg::<u64, 8>(Register::RSP) as usize;
+                    #[cfg(debug_assertions)]
+                    {
+                        self.stack_depth += 1;
+                    }
+                    let sp = self.get_reg::<u64, 8>(Register::RSP) as usize
+                        - core::mem::size_of_val(&$expr) as usize;
+                    println!("sp: {sp:#x}");
+                    println!("push val size: {:#x}", core::mem::size_of_val(&$expr));
+                    println!("stack size: {:#x}", self.stack_depth);
                     self.memory.write_primitive(Virtaddr(sp), $expr)?;
-                    self.set_reg(sp - core::mem::size_of_val(&$expr) as usize, Register::RSP);
+                    self.set_reg(sp, Register::RSP);
+                    println!("new sp: {:#x}", self.get_reg::<u64, 8>(Register::RSP));
                 };
             }
             macro_rules! pop {
                 ($exp:expr) => {{
+                    #[cfg(debug_assertions)]
+                    {
+                        self.stack_depth -= 1;
+                    }
+                    println!("stack size: {:#x}", self.stack_depth);
                     let sp = self.get_reg::<u64, 8>(Register::RSP) as usize;
                     self.set_reg(sp + $exp as usize, Register::RSP);
                     self.memory.read_primitive(Virtaddr(sp))?
@@ -292,11 +340,10 @@ impl Emu {
                 }
                 Mnemonic::Push => {
                     // TODO: do bitness stuff here
-                    let val: usize = self.get_val::<_, 8>(instruction, 0)?;
+                    let val: u64 = self.get_val::<_, 8>(instruction, 0)?;
                     push!(val);
                 }
                 Mnemonic::Ret => {
-                    self.print_stack::<u64, 8>(0x20);
                     // get the new ip
                     let new_ip: u64 = u64::from_ne_bytes(pop!(8));
                     println!("ret to: {new_ip:#x}");
