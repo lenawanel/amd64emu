@@ -211,12 +211,8 @@ impl Emu {
                     }
                     let sp = self.get_reg::<u64, 8>(Register::RSP) as usize
                         - core::mem::size_of_val(&$expr) as usize;
-                    println!("sp: {sp:#x}");
-                    println!("push val size: {:#x}", core::mem::size_of_val(&$expr));
-                    println!("stack size: {:#x}", self.stack_depth);
                     self.memory.write_primitive(Virtaddr(sp), $expr)?;
                     self.set_reg(sp, Register::RSP);
-                    println!("new sp: {:#x}", self.get_reg::<u64, 8>(Register::RSP));
                 };
             }
             macro_rules! pop {
@@ -225,7 +221,6 @@ impl Emu {
                     {
                         self.stack_depth -= 1;
                     }
-                    println!("stack size: {:#x}", self.stack_depth);
                     let sp = self.get_reg::<u64, 8>(Register::RSP) as usize;
                     self.set_reg(sp + $exp as usize, Register::RSP);
                     self.memory.read_primitive(Virtaddr(sp))?
