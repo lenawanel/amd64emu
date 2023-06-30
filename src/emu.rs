@@ -108,7 +108,7 @@ impl Emu {
             OpKind::NearBranch64 => Ok(instruction.near_branch64().try_into().unwrap()),
             OpKind::Immediate8 => todo!(),
             OpKind::Immediate16 => todo!(),
-            OpKind::Immediate32 => todo!(),
+            OpKind::Immediate32 => T::try_from(instruction.immediate32() as u64).map_err(|_| ()),
             OpKind::Immediate64 => todo!(),
             OpKind::Immediate8to16 => todo!(),
             OpKind::Immediate8to32 => todo!(),
@@ -125,6 +125,15 @@ impl Emu {
                     .map(T::from_ne_bytes)
             }
             x => todo!("{x:?}"),
+        }
+    }
+
+    /// print the stack, looking back length bytes
+    pub fn print_stack<T: Primitive<BYTES>, const BYTES: usize>(&self, length: usize) -> () {
+        let stack_addr: usize = self.get_reg(Register::RSP);
+        for i in stack_addr..stack_addr + length {
+            let val = T::from_ne_bytes(self.memory.read_primitive(Virtaddr(i)).unwrap());
+            println!("{val:#x?}");
         }
     }
 
@@ -153,37 +162,47 @@ impl Emu {
                     self.set_reg(new_val, $reg);
                 };
             }
+            // decrements a register with a usize
+            macro_rules! dec_reg {
+                ($exp:expr, $reg:expr) => {
+                    let new_val = self.get_reg::<usize, 8>($reg) - $exp;
+                    self.set_reg(new_val, $reg);
+                };
+            }
             macro_rules! push {
                 ($expr:expr) => {
                     let sp = self.get_reg::<u64, 8>(Register::RSP) as usize;
-                    println!("pushing to: {sp:#x}");
                     self.memory.write_primitive(Virtaddr(sp), $expr)?;
                     self.set_reg(sp - core::mem::size_of_val(&$expr) as usize, Register::RSP);
                 };
             }
+            macro_rules! pop {
+                ($exp:expr) => {{
+                    let sp = self.get_reg::<u64, 8>(Register::RSP) as usize;
+                    self.set_reg(sp + $exp as usize, Register::RSP);
+                    self.memory.read_primitive(Virtaddr(sp))?
+                }};
+            }
 
             println!("executing: {:#x?}", self.get_reg::<usize, 8>(Register::RIP));
 
-            // set rip to the next instruction
-            // this needs to be done here to correctly handle
-            // instructions wiht offsets
-            inc_reg!(instruction.len(), Register::RIP);
             match instruction.mnemonic() {
                 Mnemonic::Add => {
                     // treat this as usize for now.
                     // this is wrong so
                     // TODO: handle diffrent op sizes here
-                    self.do_loar_op::<usize, _, 8>(instruction, std::ops::Add::add)?;
+                    self.do_loar_op::<usize, _, 8>(instruction, core::ops::Add::add)?;
                 }
                 Mnemonic::And => {
                     // treat this as usize for now.
                     // this is wrong so
                     // TODO: handle diffrent op sizes here
-                    self.do_loar_op::<usize, _, 8>(instruction, std::ops::BitAnd::bitand)?;
+                    self.do_loar_op::<usize, _, 8>(instruction, core::ops::BitAnd::bitand)?;
                 }
                 Mnemonic::Call => {
                     // get the new ip
                     let new_ip: usize = self.get_val::<usize, 8>(instruction, 0)?;
+                    println!("calling: {new_ip:#x}");
                     push!(self.get_reg::<usize, 8>(Register::RIP));
                     self.set_reg(new_ip, Register::RIP);
                     continue 'next_instr;
@@ -194,15 +213,15 @@ impl Emu {
                     // XXX: actually make this correct
                     match lhs.cmp(&rhs) {
                         // unset the carry flag and the zero flag if above
-                        std::cmp::Ordering::Greater => self.set_reg(
+                        core::cmp::Ordering::Greater => self.set_reg(
                             /* !*/
                             (0 << 6) | (0 << 0), /*& self.get_reg::<u64, 8>(Register::RFLAGS)*/
                             Register::RFLAGS,
                         ),
                         // set the zero flag if eq
-                        std::cmp::Ordering::Equal => self.set_reg(1 << 6, Register::RFLAGS),
+                        core::cmp::Ordering::Equal => self.set_reg(1 << 6, Register::RFLAGS),
                         // unset the carry flag and set the zero flag if less
-                        std::cmp::Ordering::Less => self.set_reg(
+                        core::cmp::Ordering::Less => self.set_reg(
                             (0 << 6) | (1 << 0), /*& self.get_reg::<u64, 8>(Register::RFLAGS)*/
                             Register::RFLAGS,
                         ),
@@ -213,6 +232,20 @@ impl Emu {
                 }
                 Mnemonic::Jne => {
                     if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 6) == 0 {
+                        let new_ip: usize = self.get_val::<usize, 8>(instruction, 0)?;
+                        self.set_reg(new_ip, Register::RIP);
+                        continue 'next_instr;
+                    }
+                }
+                Mnemonic::Je => {
+                    if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 6) != 0 {
+                        let new_ip: usize = self.get_val::<usize, 8>(instruction, 0)?;
+                        self.set_reg(new_ip, Register::RIP);
+                        continue 'next_instr;
+                    }
+                }
+                Mnemonic::Jmp => {
+                    if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 6) != 0 {
                         let new_ip: usize = self.get_val::<usize, 8>(instruction, 0)?;
                         self.set_reg(new_ip, Register::RIP);
                         continue 'next_instr;
@@ -236,19 +269,21 @@ impl Emu {
                     // also let's hope that this sign extends
                     self.do_loar_op::<isize, _, 8>(instruction, |x, _| x)?;
                 }
+                Mnemonic::Movzx => {
+                    // this is some hacky shit, I love it
+                    // also not really respecting bitness, so
+                    // TODO: respect bitness here
+                    self.do_loar_op::<usize, _, 8>(instruction, |x, _| x)?;
+                }
+                Mnemonic::Nop => {
+                    // it's literally a Nop
+                }
                 Mnemonic::Sub => {
                     // also not really respecting bitness, so
                     // TODO: respect bitness here
                     self.do_loar_op::<isize, _, 8>(instruction, core::ops::Sub::sub)?;
                 }
                 Mnemonic::Pop => {
-                    macro_rules! pop {
-                        ($exp:expr) => {{
-                            let sp = self.get_reg::<u64, 8>(Register::RSP) as usize;
-                            self.set_reg(sp + $exp as usize, Register::RSP);
-                            self.memory.read_primitive(Virtaddr(sp))?
-                        }};
-                    }
                     // TODO: do bitness stuff here
                     let val = usize::from_ne_bytes(pop!(8));
                     self.set_val(instruction, 0, val)?;
@@ -256,8 +291,45 @@ impl Emu {
                 Mnemonic::Push => {
                     // TODO: do bitness stuff here
                     let val: usize = self.get_val::<_, 8>(instruction, 0)?;
-                    println!("after getting value to push");
                     push!(val);
+                }
+                Mnemonic::Ret => {
+                    // get the new ip
+                    let new_ip: u64 = u64::from_ne_bytes(pop!(8));
+                    println!("ret to: {new_ip:#x}");
+                    push!(self.get_reg::<usize, 8>(Register::RIP));
+                    self.set_reg(new_ip, Register::RIP);
+                    continue 'next_instr;
+                }
+                Mnemonic::Stosq => {
+                    let base_addr: usize = self.get_reg(Register::RDI);
+                    let rax_val: u64 = self.get_reg(Register::RAX);
+                    println!("stosq base addr: {base_addr:#x}");
+                    if instruction.has_rep_prefix() {
+                        loop {
+                            let index: usize = self.get_reg(Register::RCX);
+
+                            self.memory
+                                .write_primitive(Virtaddr(index + base_addr), rax_val)?;
+                            if self.get_reg::<usize, 8>(Register::RCX) < 8 {
+                                inc_reg!(instruction.len(), Register::RIP);
+                                continue 'next_instr;
+                            }
+                            dec_reg!(8, Register::RCX);
+                        }
+                    } else {
+                        todo!()
+                    }
+                }
+                Mnemonic::Test => {
+                    let lhs: usize = self.get_val(instruction, 0)?;
+                    let rhs: usize = self.get_val(instruction, 1)?;
+                    let and_res: usize = lhs & rhs;
+                    self.set_reg(
+                        // TODO: handle parity flag
+                        (and_res & 1 << 63) | if and_res == 0 { 1 << 6 } else { 0 << 6 },
+                        Register::RFLAGS,
+                    );
                 }
                 Mnemonic::Xor => {
                     // treat this as usize for now.
@@ -265,12 +337,10 @@ impl Emu {
                     // TODO: handle diffrent op sizes here
                     self.do_loar_op::<usize, _, 8>(instruction, core::ops::BitOr::bitor)?;
                 }
-                Mnemonic::Nop => {
-                    // it's literally a Nop
-                }
                 x => todo!("unsupported opcode: {x:?}"),
             };
             // set the instruction pointer to the next instruction
+            inc_reg!(instruction.len(), Register::RIP);
         }
     }
 
@@ -292,7 +362,6 @@ impl Emu {
         // TODO: make the caller responsible for giving the right operands
         let rhs: T = self.get_val::<T, BYTES>(instruction, 1)?;
         let lhs: T = self.get_val::<T, BYTES>(instruction, 0)?;
-        println!("lhs: {lhs:#x?} rhs: {rhs:#x?}");
         let new_lhs = f(lhs, rhs);
         self.set_val(instruction, 0, new_lhs)
     }
@@ -378,6 +447,8 @@ fn reg_from_op_reg(reg: iced_x86::Register) -> Option<Register> {
         Register::RCX => Some(RCX),
         Register::ECX => Some(RCX),
         Register::RDX => Some(RDX),
+        Register::EDX => Some(RDX),
+        Register::DX => Some(RDX),
         Register::RBX => Some(RBX),
         Register::RSP => Some(RSP),
         Register::RBP => Some(RBP),
