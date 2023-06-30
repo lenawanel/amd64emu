@@ -131,7 +131,7 @@ impl Emu {
     /// print the stack, looking back length bytes
     pub fn print_stack<T: Primitive<BYTES>, const BYTES: usize>(&self, length: usize) -> () {
         let stack_addr: usize = self.get_reg(Register::RSP);
-        for i in stack_addr..stack_addr + length {
+        for i in (stack_addr..stack_addr + (length * BYTES)).step_by(BYTES) {
             let val = T::from_ne_bytes(self.memory.read_primitive(Virtaddr(i)).unwrap());
             println!("{val:#x?}");
         }
@@ -186,6 +186,8 @@ impl Emu {
 
             println!("executing: {:#x?}", self.get_reg::<usize, 8>(Register::RIP));
 
+            // set the instruction pointer to the next instruction
+            inc_reg!(instruction.len(), Register::RIP);
             match instruction.mnemonic() {
                 Mnemonic::Add => {
                     // treat this as usize for now.
@@ -294,6 +296,7 @@ impl Emu {
                     push!(val);
                 }
                 Mnemonic::Ret => {
+                    self.print_stack::<u64, 8>(0x20);
                     // get the new ip
                     let new_ip: u64 = u64::from_ne_bytes(pop!(8));
                     println!("ret to: {new_ip:#x}");
@@ -312,7 +315,6 @@ impl Emu {
                             self.memory
                                 .write_primitive(Virtaddr(index + base_addr), rax_val)?;
                             if self.get_reg::<usize, 8>(Register::RCX) < 8 {
-                                inc_reg!(instruction.len(), Register::RIP);
                                 continue 'next_instr;
                             }
                             dec_reg!(8, Register::RCX);
@@ -339,8 +341,6 @@ impl Emu {
                 }
                 x => todo!("unsupported opcode: {x:?}"),
             };
-            // set the instruction pointer to the next instruction
-            inc_reg!(instruction.len(), Register::RIP);
         }
     }
 
