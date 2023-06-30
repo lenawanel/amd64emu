@@ -2,7 +2,8 @@ use core::fmt::Debug;
 use std::path::Path;
 
 // this is impossible to because of https://github.com/bitdefender/bddisasm/issues/82 ;(
-use bddisasm::{operand::Operands, DecodedInstruction, OpInfo, Operand};
+// use bddisasm::{operand::Operands, DecodedInstruction, OpInfo, Operand};
+use iced_x86::{Decoder, Instruction, Mnemonic, OpKind};
 
 use crate::{
     mmu::{Virtaddr, MMU},
@@ -79,7 +80,6 @@ impl Emu {
         <T as TryFrom<u64>>::Error: Debug,
         <T as TryFrom<u128>>::Error: Debug,
     {
-        // let buf = [0u8; BYTES];
         if (register as u8) < self.registers.len() as u8 {
             self.registers[register as usize].try_into().unwrap()
         } else {
@@ -92,34 +92,40 @@ impl Emu {
     #[inline]
     pub fn get_val<T: Primitive<BYTES>, const BYTES: usize>(
         &self,
-        operand: Operand,
+        instruction: Instruction,
+        index: u32,
     ) -> Result<T, ()>
     where
         <T as TryFrom<u64>>::Error: Debug,
         <T as TryFrom<u128>>::Error: Debug,
     {
-        match operand.info {
-            bddisasm::OpInfo::None => unreachable!("accesed an operand which does not exist"),
-            bddisasm::OpInfo::Reg(reg) => {
-                let reg: Register = reg_from_op_reg(reg);
+        let operand = instruction.op_kind(index);
+        match operand {
+            OpKind::Register => {
+                let reg: Register = reg_from_op_reg(instruction.op_register(index)).unwrap();
                 Ok(self.get_reg(reg))
             }
-            bddisasm::OpInfo::Mem(mem) => {
-                let address: usize = self.calc_addr(mem);
+            OpKind::NearBranch64 => Ok(instruction.near_branch64().try_into().unwrap()),
+            OpKind::Immediate8 => todo!(),
+            OpKind::Immediate16 => todo!(),
+            OpKind::Immediate32 => todo!(),
+            OpKind::Immediate64 => todo!(),
+            OpKind::Immediate8to16 => todo!(),
+            OpKind::Immediate8to32 => todo!(),
+            OpKind::Immediate8to64 => {
+                T::try_from(instruction.immediate8to64() as u64).map_err(|_| ())
+            }
+            OpKind::Immediate32to64 => {
+                T::try_from(instruction.immediate32to64() as u64).map_err(|_| ())
+            }
+            OpKind::Memory => {
+                let address: usize = self.calc_addr(instruction);
                 self.memory
                     .read_primitive(Virtaddr(address))
                     .map(T::from_ne_bytes)
             }
-            bddisasm::OpInfo::Imm(imm) => T::try_from(imm).map_err(|_| ()),
-            bddisasm::OpInfo::Offs(offset) => {
-                T::try_from(self.get_reg::<u64, 8>(Register::RIP).wrapping_add(offset))
-                    .map_err(|_| ())
-            }
-            bddisasm::OpInfo::Addr(_) => todo!(),
-            bddisasm::OpInfo::Const(cons) => T::try_from(cons).map_err(|_| ()),
-            bddisasm::OpInfo::Bank => todo!(),
+            x => todo!("{x:?}"),
         }
-        // todo!()
     }
 
     pub fn run_emu(&mut self) -> Result<(), ()> {
@@ -137,8 +143,8 @@ impl Emu {
             )?;
 
             // TODO: support 32 bit mode
-            let instruction = DecodedInstruction::decode(&inst_buf, bddisasm::DecodeMode::Bits64)
-                .map_err(|_| ())?;
+            let instruction =
+                Decoder::with_ip(64, &inst_buf, self.get_reg(Register::RIP), 0).decode();
 
             // increments a register with a usize
             macro_rules! inc_reg {
@@ -150,6 +156,7 @@ impl Emu {
             macro_rules! push {
                 ($expr:expr) => {
                     let sp = self.get_reg::<u64, 8>(Register::RSP) as usize;
+                    println!("pushing to: {sp:#x}");
                     self.memory.write_primitive(Virtaddr(sp), $expr)?;
                     self.set_reg(sp - core::mem::size_of_val(&$expr) as usize, Register::RSP);
                 };
@@ -160,115 +167,81 @@ impl Emu {
             // set rip to the next instruction
             // this needs to be done here to correctly handle
             // instructions wiht offsets
-            inc_reg!(instruction.length(), Register::RIP);
+            inc_reg!(instruction.len(), Register::RIP);
             match instruction.mnemonic() {
-                bddisasm::Mnemonic::Adcx => todo!(),
-                bddisasm::Mnemonic::Add => todo!(),
-                bddisasm::Mnemonic::Addpd => todo!(),
-                bddisasm::Mnemonic::Addps => todo!(),
-                bddisasm::Mnemonic::Addsd => todo!(),
-                bddisasm::Mnemonic::Addss => todo!(),
-                bddisasm::Mnemonic::Addsubpd => todo!(),
-                bddisasm::Mnemonic::Addsubps => todo!(),
-                bddisasm::Mnemonic::And => {
-                    let operands = instruction.operands();
+                Mnemonic::Add => {
                     // treat this as usize for now.
                     // this is wrong so
                     // TODO: handle diffrent op sizes here
-                    self.do_loar_op::<usize, _, 8>(&operands, std::ops::BitAnd::bitand)?;
+                    self.do_loar_op::<usize, _, 8>(instruction, std::ops::Add::add)?;
                 }
-                bddisasm::Mnemonic::Andn => todo!(),
-                bddisasm::Mnemonic::Andnpd => todo!(),
-                bddisasm::Mnemonic::Andnps => todo!(),
-                bddisasm::Mnemonic::Andpd => todo!(),
-                bddisasm::Mnemonic::Andps => todo!(),
-                bddisasm::Mnemonic::Callnr => {
+                Mnemonic::And => {
+                    // treat this as usize for now.
+                    // this is wrong so
+                    // TODO: handle diffrent op sizes here
+                    self.do_loar_op::<usize, _, 8>(instruction, std::ops::BitAnd::bitand)?;
+                }
+                Mnemonic::Call => {
                     // get the new ip
-                    let new_ip: usize = self.get_val::<usize, 8>(instruction.operands()[0])?;
+                    let new_ip: usize = self.get_val::<usize, 8>(instruction, 0)?;
                     push!(self.get_reg::<usize, 8>(Register::RIP));
                     self.set_reg(new_ip, Register::RIP);
                     continue 'next_instr;
                 }
-                bddisasm::Mnemonic::Cmovcc => todo!(),
-                bddisasm::Mnemonic::Cmp => todo!(),
-                bddisasm::Mnemonic::Cpuid => todo!(),
-                bddisasm::Mnemonic::Dec => todo!(),
-                bddisasm::Mnemonic::Div => todo!(),
-                bddisasm::Mnemonic::Divpd => todo!(),
-                bddisasm::Mnemonic::Divps => todo!(),
-                bddisasm::Mnemonic::Divsd => todo!(),
-                bddisasm::Mnemonic::Divss => todo!(),
-                bddisasm::Mnemonic::Endbr => {
-                    // do nothing here for now
-                }
-                bddisasm::Mnemonic::Idiv => todo!(),
-                bddisasm::Mnemonic::Imul => todo!(),
-                bddisasm::Mnemonic::Inc => todo!(),
-                bddisasm::Mnemonic::Jmpe => todo!(),
-                bddisasm::Mnemonic::Jmpfd => todo!(),
-                bddisasm::Mnemonic::Jmpfi => todo!(),
-                bddisasm::Mnemonic::Jmpni => todo!(),
-                bddisasm::Mnemonic::Jmpnr => todo!(),
-                bddisasm::Mnemonic::Jcc => todo!(),
-                bddisasm::Mnemonic::Lea => {
-                    let ops_lookup = instruction.operand_lookup();
-                    let op_reg = ops_lookup.dest(0).unwrap();
-                    let op_mem = ops_lookup.mem(0).unwrap();
-                    if let OpInfo::Mem(mem) = op_mem.info {
-                        self.set_val(op_reg, self.calc_addr(mem))?;
-                    } else {
-                        unreachable!()
+                Mnemonic::Cmp => {
+                    let lhs: usize = self.get_val(instruction, 0)?;
+                    let rhs: usize = self.get_val(instruction, 0)?;
+                    // XXX: actually make this correct
+                    match lhs.cmp(&rhs) {
+                        // unset the carry flag and the zero flag if above
+                        std::cmp::Ordering::Greater => self.set_reg(
+                            /* !*/
+                            (0 << 6) | (0 << 0), /*& self.get_reg::<u64, 8>(Register::RFLAGS)*/
+                            Register::RFLAGS,
+                        ),
+                        // set the zero flag if eq
+                        std::cmp::Ordering::Equal => self.set_reg(1 << 6, Register::RFLAGS),
+                        // unset the carry flag and set the zero flag if less
+                        std::cmp::Ordering::Less => self.set_reg(
+                            (0 << 6) | (1 << 0), /*& self.get_reg::<u64, 8>(Register::RFLAGS)*/
+                            Register::RFLAGS,
+                        ),
                     }
                 }
-                bddisasm::Mnemonic::Mov => {
-                    let operands = instruction.operands();
+                Mnemonic::Endbr64 => {
+                    // do nothing here for now
+                }
+                Mnemonic::Jne => {
+                    if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 6) == 0 {
+                        let new_ip: usize = self.get_val::<usize, 8>(instruction, 0)?;
+                        self.set_reg(new_ip, Register::RIP);
+                        continue 'next_instr;
+                    }
+                }
+                Mnemonic::Lea => {
+                    // calling set_val and matching is overkill here
+                    // so TODO: inline the set_reg call performed here
+                    self.set_val(instruction, 0, self.calc_addr(instruction))?;
+                }
+                Mnemonic::Mov => {
                     // this is some hacky shit
                     // also not really respecting bitness, so
                     // TODO: respect bitness here
-                    self.do_loar_op::<usize, _, 8>(&operands, |x, _| x)?;
+                    self.do_loar_op::<usize, _, 8>(instruction, |_, x| x)?;
                 }
-                bddisasm::Mnemonic::Movapd => todo!(),
-                bddisasm::Mnemonic::Movaps => todo!(),
-                bddisasm::Mnemonic::Movbe => todo!(),
-                bddisasm::Mnemonic::Movd => todo!(),
-                bddisasm::Mnemonic::Movddup => todo!(),
-                bddisasm::Mnemonic::Movdqu => todo!(),
-                bddisasm::Mnemonic::Movq => todo!(),
-                bddisasm::Mnemonic::Movq2dq => todo!(),
-                bddisasm::Mnemonic::Movs => todo!(),
-                bddisasm::Mnemonic::Movsd => todo!(),
-                bddisasm::Mnemonic::Movshdup => todo!(),
-                bddisasm::Mnemonic::Movsldup => todo!(),
-                bddisasm::Mnemonic::Movsxd => {
-                    let operands = instruction.operands();
-                    // this is some hacky shit
+                Mnemonic::Movsxd => {
+                    // this is some hacky shit, I love it
                     // also not really respecting bitness, so
                     // TODO: respect bitness here
                     // also let's hope that this sign extends
-                    self.do_loar_op::<isize, _, 8>(&operands, |x, _| x)?;
+                    self.do_loar_op::<isize, _, 8>(instruction, |x, _| x)?;
                 }
-                bddisasm::Mnemonic::Mul => todo!(),
-                bddisasm::Mnemonic::Mulpd => todo!(),
-                bddisasm::Mnemonic::Mulps => todo!(),
-                bddisasm::Mnemonic::Mulsd => todo!(),
-                bddisasm::Mnemonic::Mulss => todo!(),
-                bddisasm::Mnemonic::Mulx => todo!(),
-                bddisasm::Mnemonic::Neg => todo!(),
-                bddisasm::Mnemonic::Nop => {}
-                bddisasm::Mnemonic::Not => todo!(),
-                bddisasm::Mnemonic::Or => todo!(),
-                bddisasm::Mnemonic::Retf => todo!(),
-                bddisasm::Mnemonic::Retn => todo!(),
-                bddisasm::Mnemonic::Sub => {
-                    let operands = instruction.operands();
-                    // this is some hacky shit
+                Mnemonic::Sub => {
                     // also not really respecting bitness, so
                     // TODO: respect bitness here
-                    self.do_loar_op::<isize, _, 8>(&operands, core::ops::Sub::sub)?;
+                    self.do_loar_op::<isize, _, 8>(instruction, core::ops::Sub::sub)?;
                 }
-                bddisasm::Mnemonic::Syscall => todo!(),
-                bddisasm::Mnemonic::Test => todo!(),
-                bddisasm::Mnemonic::Pop => {
+                Mnemonic::Pop => {
                     macro_rules! pop {
                         ($exp:expr) => {{
                             let sp = self.get_reg::<u64, 8>(Register::RSP) as usize;
@@ -278,24 +251,23 @@ impl Emu {
                     }
                     // TODO: do bitness stuff here
                     let val = usize::from_ne_bytes(pop!(8));
-                    self.set_val(instruction.operands()[0], val)?;
+                    self.set_val(instruction, 0, val)?;
                 }
-                bddisasm::Mnemonic::Push => {
+                Mnemonic::Push => {
                     // TODO: do bitness stuff here
-                    let val: usize = self.get_val::<_, 8>(instruction.operands()[0])?;
+                    let val: usize = self.get_val::<_, 8>(instruction, 0)?;
+                    println!("after getting value to push");
                     push!(val);
                 }
-                bddisasm::Mnemonic::Xor => {
-                    let operands = instruction.operands();
+                Mnemonic::Xor => {
                     // treat this as usize for now.
                     // this is wrong so
                     // TODO: handle diffrent op sizes here
-                    self.do_loar_op::<usize, _, 8>(&operands, core::ops::BitOr::bitor)?;
+                    self.do_loar_op::<usize, _, 8>(instruction, core::ops::BitOr::bitor)?;
                 }
-                bddisasm::Mnemonic::Xorpd => todo!(),
-                bddisasm::Mnemonic::Xorps => todo!(),
-                bddisasm::Mnemonic::Xrstor => todo!(),
-                bddisasm::Mnemonic::Xrstors => todo!(),
+                Mnemonic::Nop => {
+                    // it's literally a Nop
+                }
                 x => todo!("unsupported opcode: {x:?}"),
             };
             // set the instruction pointer to the next instruction
@@ -308,7 +280,7 @@ impl Emu {
     #[inline]
     pub fn do_loar_op<T: Primitive<BYTES>, F: Fn(T, T) -> T, const BYTES: usize>(
         &mut self,
-        operands: &Operands,
+        instruction: Instruction,
         f: F,
     ) -> Result<(), ()>
     where
@@ -318,10 +290,11 @@ impl Emu {
         <T as TryInto<u128>>::Error: Debug,
     {
         // TODO: make the caller responsible for giving the right operands
-        let rhs: T = self.get_val::<T, BYTES>(operands[1])?;
-        let lhs: T = self.get_val::<T, BYTES>(operands[0])?;
+        let rhs: T = self.get_val::<T, BYTES>(instruction, 1)?;
+        let lhs: T = self.get_val::<T, BYTES>(instruction, 0)?;
+        println!("lhs: {lhs:#x?} rhs: {rhs:#x?}");
         let new_lhs = f(lhs, rhs);
-        self.set_val(operands[0], new_lhs)
+        self.set_val(instruction, 0, new_lhs)
     }
 
     /// set an operand to a value.
@@ -330,58 +303,64 @@ impl Emu {
     #[inline]
     fn set_val<T: Primitive<BYTES>, const BYTES: usize>(
         &mut self,
-        operand: Operand,
+        instruction: Instruction,
+        index: u32,
         val: T,
     ) -> Result<(), ()>
     where
         <T as TryInto<u64>>::Error: Debug,
         <T as TryInto<u128>>::Error: Debug,
     {
-        match operand.info {
-            bddisasm::OpInfo::None => unreachable!("accesed an operand which does not exist"),
-            bddisasm::OpInfo::Reg(reg) => {
-                let reg: Register = reg_from_op_reg(reg);
+        let opkind = instruction.op_kind(index);
+        match opkind {
+            OpKind::Register => {
+                let reg: Register = reg_from_op_reg(instruction.op_register(index)).unwrap();
                 Ok(self.set_reg(val, reg))
             }
-            bddisasm::OpInfo::Mem(mem) => {
-                let address: usize = self.calc_addr(mem);
+            OpKind::NearBranch16 => todo!(),
+            OpKind::NearBranch32 => todo!(),
+            OpKind::NearBranch64 => todo!(),
+            OpKind::FarBranch16 => todo!(),
+            OpKind::FarBranch32 => todo!(),
+            OpKind::Memory => {
+                let address: usize = self.calc_addr(instruction);
                 self.memory.write_primitive(Virtaddr(address), val)
             }
-            bddisasm::OpInfo::Imm(_) => todo!(),
-            bddisasm::OpInfo::Offs(_) => todo!(),
-            bddisasm::OpInfo::Addr(_) => todo!(),
-            bddisasm::OpInfo::Const(_) => unreachable!(),
-            bddisasm::OpInfo::Bank => todo!(),
+            x => todo!("{x:?}"),
         }
     }
 
-    fn calc_addr(&self, mem: bddisasm::OpMem) -> usize {
-        if mem.is_rip_rel {
-            // self.get_reg(Register::RIP);
-            todo!("{mem:?}")
-        } else if mem.is_direct {
-            todo!("{mem:?}")
+    #[inline]
+    /// resolve the address an instruction uses
+    // XXX: I think there only can be one
+    fn calc_addr(&self, mem: Instruction) -> usize {
+        // check if we're addressing relative to ip
+        // with PIC the compiler is going to use ip relative memory acceses
+        if mem.is_ip_rel_memory_operand() {
+            // if that is so, let iced calculate the address for us
+            mem.ip_rel_memory_address() as usize
         } else {
-            // just pretend like we're using the same register index as
-            // bddisasm + 3
-            let mut addr = self.get_reg(unsafe {
-                let reg = core::mem::transmute::<u8, Register>(mem.base.unwrap() + 3);
-                println!("base reg : {reg:?}");
-                reg
-            });
-            println!("base reg addr: {addr:#x}");
-            if let Some(index_reg) = mem.index {
-                // by bddisasms doc
-                // mem_index == Some(_) -> mem.scale == Some(_)
-                // so we can just not check the unwrap here
-                let scale = unsafe { mem.scale.unwrap_unchecked() } as usize;
-                unsafe {
-                    addr += scale
-                        * self.get_reg::<usize, 8>(core::mem::transmute::<u8, Register>(index_reg));
-                }
+            // get the displacement first, since any memory acces will have one (even if it's 0)
+            let mut addr = mem.memory_displacement64() as usize;
+            // check if there is a memory indexing register like in
+            // call   QWORD PTR [r12+r14*8]
+            // if that is the case, then multiply the value stored in the register (r14 in the above)
+            // with its scale (8 in the above case)
+            // and add the resulting value to the displacement
+            if let Some(index_reg) = reg_from_op_reg(mem.memory_index()) {
+                let scale = mem.memory_index_scale() as usize;
+                addr += scale * self.get_reg::<usize, 8>(index_reg);
             }
-            if let Some(displacement) = mem.disp {
-                addr += displacement as usize;
+            // check if there is a base register indexing the memory
+            // if that is the case, add the value stored in the register to the current address
+            // example:
+            // call   QWORD PTR [r12+r14*8]
+            // here r12 is the base register
+            if let Some(base_reg) = reg_from_op_reg(mem.memory_base()) {
+                // this can be wrapping, for example you can have
+                // cmp    QWORD PTR [rdi-0x8],0x0
+                // substracting some displacement (i.e. doing a wrapping add (I could be wrong here))
+                addr = addr.wrapping_add(self.get_reg::<usize, 8>(base_reg));
             }
             addr
         }
@@ -389,17 +368,36 @@ impl Emu {
 }
 
 #[inline]
-fn reg_from_op_reg(reg: bddisasm::OpReg) -> Register {
-    match reg.kind {
-        bddisasm::OpRegType::Gpr => unsafe {
-            // let's just hope intel doc agrees with us
-            let reg = std::mem::transmute::<u8, Register>(reg.index as u8);
-            reg
-        },
-        bddisasm::OpRegType::Mmx => todo!(),
-        bddisasm::OpRegType::Flg => Register::RFLAGS,
-        bddisasm::OpRegType::Rip => Register::RIP,
-        x => todo!("implement register {x}"),
+fn reg_from_op_reg(reg: iced_x86::Register) -> Option<Register> {
+    use self::Register::*;
+    use iced_x86::Register;
+    match reg {
+        Register::None => None,
+        Register::RAX => Some(RAX),
+        Register::EAX => Some(RAX),
+        Register::RCX => Some(RCX),
+        Register::ECX => Some(RCX),
+        Register::RDX => Some(RDX),
+        Register::RBX => Some(RBX),
+        Register::RSP => Some(RSP),
+        Register::RBP => Some(RBP),
+        Register::EBP => Some(RBP),
+        Register::RSI => Some(RSI),
+        Register::ESI => Some(RSI),
+        Register::RDI => Some(RDI),
+        Register::R8 => Some(R8),
+        Register::R8D => Some(R8),
+        Register::R9 => Some(R9),
+        Register::R10 => Some(R10),
+        Register::R11 => Some(R11),
+        Register::R12 => Some(R12),
+        Register::R13 => Some(R13),
+        Register::R14 => Some(R14),
+        Register::R15 => Some(R15),
+        Register::R15D => Some(R15),
+        Register::EIP => Some(RIP),
+        Register::RIP => Some(RIP),
+        x => todo!("implement register {x:?}"),
     }
 }
 

@@ -8,4 +8,4 @@ edition = "2021"
 [dependencies]
 iced-x86 = { version = "1.19.0", default-features = false, features = ["no_std", "decoder"] }
 elf = { version = "0.7.2", default-features = false }
-bddisasm = "0.2.1"
+# bddisasm = "0.2.1"
