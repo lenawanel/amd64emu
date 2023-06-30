@@ -1,0 +1,11 @@
+[package]
+name = "amd64_emu"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+iced-x86 = { version = "1.19.0", default-features = false, features = ["no_std", "decoder"] }
+elf = { version = "0.7.2", default-features = false }
+bddisasm = "0.2.1"
