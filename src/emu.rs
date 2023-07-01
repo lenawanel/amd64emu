@@ -1,5 +1,5 @@
 use core::fmt::Debug;
-use std::{io::Write, ops::Range, path::Path, sync::Arc};
+use std::{io::Write, ops::Range, path::Path};
 
 // this is impossible to because of https://github.com/bitdefender/bddisasm/issues/82 ;(
 // use bddisasm::{operand::Operands, DecodedInstruction, OpInfo, Operand};
@@ -391,25 +391,52 @@ impl Emu {
                     // do nothing here for now
                 }
                 Mnemonic::Jne => {
-                    if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 6) == 0 {
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0 {
+                        // get the new ip
                         let new_ip: usize = self.get_val::<usize, 8>(instruction, 0)?;
                         self.set_reg(new_ip, Register::RIP);
+                        // and jump to it
+                        continue 'next_instr;
+                    }
+                }
+                Mnemonic::Jbe => {
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0
+                        || self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) != 0
+                    {
+                        // get the new ip
+                        let new_ip: u64 = self.get_val::<u64, 8>(instruction, 0)?;
+                        self.set_reg(new_ip, Register::RIP);
+                        // and jump to it
                         continue 'next_instr;
                     }
                 }
                 Mnemonic::Je => {
                     if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 6) != 0 {
+                        // get the new ip
                         let new_ip: u64 = self.get_val::<u64, 8>(instruction, 0)?;
                         self.set_reg(new_ip, Register::RIP);
+                        // and jump to it
+                        continue 'next_instr;
+                    }
+                }
+                Mnemonic::Jle => {
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0
+                        || (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 11))
+                            != ((self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 7)) << 4)
+                    {
+                        // get the new ip
+                        let new_ip: u64 = self.get_val::<u64, 8>(instruction, 0)?;
+                        self.set_reg(new_ip, Register::RIP);
+                        // and jump to it
                         continue 'next_instr;
                     }
                 }
                 Mnemonic::Jmp => {
-                    if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 6) != 0 {
-                        let new_ip: usize = self.get_val::<usize, 8>(instruction, 0)?;
-                        self.set_reg(new_ip, Register::RIP);
-                        continue 'next_instr;
-                    }
+                    // get the new ip
+                    let new_ip: usize = self.get_val::<usize, 8>(instruction, 0)?;
+                    self.set_reg(new_ip, Register::RIP);
+                    // and jump to it
+                    continue 'next_instr;
                 }
                 Mnemonic::Lea => {
                     // calling set_val and matching is overkill here
@@ -465,6 +492,22 @@ impl Emu {
                 Mnemonic::Nop => {
                     // it's literally a Nop
                 }
+                Mnemonic::Or => {
+                    // or, as documented by https://www.felixcloutier.com/x86/or
+                    macro_rules! sized_sub {
+                        ($typ:ty,$size:literal) => {
+                            self.do_loar_op::<$typ, _, $size>(instruction, core::ops::BitOr::bitor)?
+                        };
+                    }
+
+                    match bitness(instruction) {
+                        Bitness::Eight => sized_sub!(u8, 1),
+                        Bitness::Sixteen => sized_sub!(u16, 2),
+                        Bitness::ThirtyTwo => sized_sub!(u32, 4),
+                        Bitness::SixtyFour => sized_sub!(u64, 8),
+                        Bitness::HundredTwentyEigth => sized_sub!(u128, 16),
+                    }
+                }
                 Mnemonic::Sub => {
                     // sub, as documented by https://www.felixcloutier.com/x86/sub
                     macro_rules! sized_sub {
@@ -519,6 +562,22 @@ impl Emu {
                 }
                 Mnemonic::Sete => {
                     self.set_val::<u8, 1>(instruction, 0, u8::MAX)?;
+                }
+                Mnemonic::Shr => {
+                    // shr, as documented by https://www.felixcloutier.com/x86/sal:sar:shl:shr
+                    macro_rules! sized_xor {
+                        ($typ:ty,$size:literal) => {
+                            self.do_loar_op::<$typ, _, $size>(instruction, core::ops::Shr::shr)?
+                        };
+                    }
+
+                    match bitness(instruction) {
+                        Bitness::Eight => sized_xor!(u8, 1),
+                        Bitness::Sixteen => sized_xor!(u16, 2),
+                        Bitness::ThirtyTwo => sized_xor!(u32, 4),
+                        Bitness::SixtyFour => sized_xor!(u64, 8),
+                        Bitness::HundredTwentyEigth => sized_xor!(u128, 16),
+                    }
                 }
                 Mnemonic::Test => {
                     let lhs: usize = self.get_val(instruction, 0)?;
@@ -812,13 +871,18 @@ fn reg_from_op_reg(reg: iced_x86::Register) -> Option<Register> {
         Register::R8 => Some(R8),
         Register::R8D => Some(R8),
         Register::R9 => Some(R9),
+        Register::R9D => Some(R9),
         Register::R10 => Some(R10),
         Register::R10D => Some(R10),
         Register::R10L => Some(R10),
         Register::R11 => Some(R11),
+        Register::R11D => Some(R11),
         Register::R12 => Some(R12),
+        Register::R12D => Some(R12),
         Register::R13 => Some(R13),
+        Register::R13D => Some(R13),
         Register::R14 => Some(R14),
+        Register::R14D => Some(R14),
         Register::R15 => Some(R15),
         Register::R15D => Some(R15),
         Register::EIP => Some(RIP),
@@ -832,6 +896,14 @@ fn reg_from_op_reg(reg: iced_x86::Register) -> Option<Register> {
 fn bitness(instr: Instruction) -> Bitness {
     match instr.op0_kind() {
         OpKind::Register => match instr.op0_register() {
+            iced_x86::Register::R8D
+            | iced_x86::Register::R9D
+            | iced_x86::Register::R10D
+            | iced_x86::Register::R11D
+            | iced_x86::Register::R12D
+            | iced_x86::Register::R13D
+            | iced_x86::Register::R14D
+            | iced_x86::Register::R15D => Bitness::ThirtyTwo,
             iced_x86::Register::AL
             | iced_x86::Register::CL
             | iced_x86::Register::DL
@@ -878,7 +950,7 @@ fn bitness(instr: Instruction) -> Bitness {
             | iced_x86::Register::R14
             | iced_x86::Register::R15
             | iced_x86::Register::RIP => Bitness::SixtyFour,
-            _ => todo!(),
+            x => todo!("{x:?}"),
         },
         OpKind::NearBranch16 => Bitness::Sixteen,
         OpKind::NearBranch32 => Bitness::ThirtyTwo,
