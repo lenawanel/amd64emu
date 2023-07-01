@@ -1,11 +1,14 @@
 pub trait Primitive<const SIZE: usize>:
     Sized
-    + TryInto<u64>
     + std::fmt::Debug
+    + TryInto<u32>
+    + TryInto<u64>
     + TryInto<u128>
     + TryInto<usize>
+    + TryFrom<u32>
     + TryFrom<u64>
     + TryFrom<u128>
+    + TryFrom<usize>
     + Copy
 {
     const BYTES: usize = SIZE;

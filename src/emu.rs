@@ -75,6 +75,7 @@ impl Emu {
     #[inline]
     pub fn set_reg<T: Primitive<BYTES>, const BYTES: usize>(&mut self, val: T, register: Register)
     where
+        <T as TryInto<u32>>::Error: Debug,
         <T as TryInto<u64>>::Error: Debug,
         <T as TryInto<u128>>::Error: Debug,
     {
@@ -88,8 +89,16 @@ impl Emu {
         }
         if (register as u8) < self.registers.len() as u8 {
             self.registers[register as usize] = val.to_u64();
-        } else {
+        } else if (register as u8) < (Register::AH as u8) {
+            // we're a 128 bit register
             self.simd_registers[register as usize - self.registers.len()] = val.try_into().unwrap();
+        } else {
+            // we're a high part of an register
+            // so first mask off the unused bits
+            self.registers[register as usize - 37] &= 0xff_ff_ff_ff_00_ff;
+            // then set it to it's new value
+            self.registers[register as usize - 37] |=
+                TryInto::<u32>::try_into(val).unwrap().overflowing_shl(16).0 as u64;
         }
     }
 
@@ -104,9 +113,13 @@ impl Emu {
             let mut bytes: [u8; BYTES] = [0; BYTES];
             bytes.copy_from_slice(&self.registers[register as usize].to_ne_bytes()[..BYTES]);
             T::from_ne_bytes(bytes)
-        } else {
+        } else if (register as u8) < (Register::AH as u8) {
             self.simd_registers[register as usize - self.registers.len()]
                 .try_into()
+                .unwrap()
+        } else {
+            // we're a high part of an register
+            T::try_from((((self.registers[register as usize - 37] as u32) & 0xff00) >> 16) as u64)
                 .unwrap()
         }
     }
@@ -313,6 +326,24 @@ impl Emu {
                     self.set_reg(new_ip, Register::RIP);
                     continue 'next_instr;
                 }
+                Mnemonic::Cmovne => {
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0 {
+                        // this is some hacky shit, I love it
+                        // let's hope that this sign extends
+                        macro_rules! sized_mov {
+                            ($typ:ty,$size:literal) => {
+                                self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
+                            };
+                        }
+                        match bitness(instruction) {
+                            Bitness::Eight => sized_mov!(i8, 1),
+                            Bitness::Sixteen => sized_mov!(i16, 2),
+                            Bitness::ThirtyTwo => sized_mov!(i32, 4),
+                            Bitness::SixtyFour => sized_mov!(i64, 8),
+                            Bitness::HundredTwentyEigth => sized_mov!(i128, 16),
+                        }
+                    }
+                }
                 Mnemonic::Cmp => {
                     // TODO: make this macro more generic, so
                     // we can use it in other contexts as well
@@ -444,7 +475,7 @@ impl Emu {
                     self.set_val(instruction, 0, self.calc_addr(instruction))?;
                 }
                 Mnemonic::Mov => {
-                    // mov, as documented by https://www.felixcloutier.com/x86/add
+                    // mov, as documented by https://www.felixcloutier.com/x86/mov
                     // this is some hacky shit
                     macro_rules! sized_mov {
                         ($typ:ty,$size:literal) => {
@@ -461,13 +492,11 @@ impl Emu {
                 }
                 Mnemonic::Movd => {
                     // this is some hacky shit, I love it
-                    // also not really respecting bitness, so
-                    // TODO: respect bitness here
                     self.do_loar_op::<u32, _, 4>(instruction, |_, x| x)?;
                 }
                 Mnemonic::Movsxd => {
-                    // mov, as documented by https://www.felixcloutier.com/x86/add
-                    // this is some hacky shit
+                    // movsxd, as documented by https://www.felixcloutier.com/x86/movsx:movsxd
+                    // this is some hacky shit, I love it
                     // let's hope that this sign extends
                     macro_rules! sized_mov {
                         ($typ:ty,$size:literal) => {
@@ -491,6 +520,21 @@ impl Emu {
                 }
                 Mnemonic::Nop => {
                     // it's literally a Nop
+                }
+                Mnemonic::Not => {
+                    macro_rules! sized_not {
+                        ($typ:ty,$size:literal) => {{
+                            let val: $typ = self.get_val(instruction, 0)?;
+                            self.set_val::<$typ, $size>(instruction, 0, !val)?;
+                        }};
+                    }
+                    match bitness(instruction) {
+                        Bitness::Eight => sized_not!(u8, 1),
+                        Bitness::Sixteen => sized_not!(u16, 2),
+                        Bitness::ThirtyTwo => sized_not!(u32, 4),
+                        Bitness::SixtyFour => sized_not!(u64, 8),
+                        Bitness::HundredTwentyEigth => sized_not!(u128, 16),
+                    }
                 }
                 Mnemonic::Or => {
                     // or, as documented by https://www.felixcloutier.com/x86/or
@@ -623,9 +667,11 @@ impl Emu {
         f: F,
     ) -> Result<(), ()>
     where
+        <T as TryFrom<u32>>::Error: Debug,
         <T as TryFrom<u64>>::Error: Debug,
         <T as TryFrom<u128>>::Error: Debug,
         <T as TryInto<u64>>::Error: Debug,
+        <T as TryInto<u32>>::Error: Debug,
         <T as TryInto<u128>>::Error: Debug,
     {
         // TODO: make the caller responsible for giving the right operands
@@ -646,6 +692,7 @@ impl Emu {
         val: T,
     ) -> Result<(), ()>
     where
+        <T as TryInto<u32>>::Error: Debug,
         <T as TryInto<u64>>::Error: Debug,
         <T as TryInto<u128>>::Error: Debug,
     {
@@ -832,6 +879,18 @@ pub enum Register {
     Xmm14,
     /// SIMD register, 128 bit
     Xmm15,
+    /// general purpose register
+    /// 16 bit hight bytes of `EAX`
+    AH,
+    /// general purpose register
+    /// 16 bit hight bytes of `ECX`
+    CH,
+    /// general purpose register
+    /// 16 bit hight bytes of `EDX`
+    DH,
+    /// general purpose register
+    /// 16 bit hight bytes of `EBX`
+    BH,
 }
 
 #[derive(Clone, Copy)]
@@ -854,10 +913,12 @@ fn reg_from_op_reg(reg: iced_x86::Register) -> Option<Register> {
         Register::AL => Some(RAX),
         Register::RCX => Some(RCX),
         Register::ECX => Some(RCX),
+        Register::CH => Some(CH),
         Register::RDX => Some(RDX),
         Register::EDX => Some(RDX),
         Register::DX => Some(RDX),
         Register::DL => Some(RDX),
+        Register::DH => Some(DH),
         Register::RBX => Some(RBX),
         Register::EBX => Some(RBX),
         Register::RSP => Some(RSP),
@@ -887,6 +948,7 @@ fn reg_from_op_reg(reg: iced_x86::Register) -> Option<Register> {
         Register::R15D => Some(R15),
         Register::EIP => Some(RIP),
         Register::RIP => Some(RIP),
+        Register::XMM0 => Some(Xmm0),
         Register::XMM1 => Some(Xmm1),
         x => todo!("implement register {x:?}"),
     }
