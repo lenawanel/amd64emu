@@ -12,7 +12,7 @@ use crate::{
 
 pub struct Emu {
     memory: MMU,
-    registers: [u64; 21],
+    registers: [u64; 18],
     simd_registers: [u128; 15],
     #[cfg(debug_assertions)]
     pub stack_depth: usize,
@@ -64,7 +64,7 @@ impl Emu {
     pub fn new(size: usize) -> Self {
         Self {
             memory: MMU::new(size),
-            registers: [0; 21],
+            registers: [0; 18],
             simd_registers: [0; 15],
             #[cfg(debug_assertions)]
             stack_depth: 0,
@@ -95,9 +95,9 @@ impl Emu {
         } else {
             // we're a high part of an register
             // so first mask off the unused bits
-            self.registers[register as usize - 37] &= 0xff_ff_ff_ff_00_ff;
+            self.registers[register as usize - 32] &= 0xff_ff_ff_ff_00_ff;
             // then set it to it's new value
-            self.registers[register as usize - 37] |=
+            self.registers[register as usize - 32] |=
                 TryInto::<u32>::try_into(val).unwrap().overflowing_shl(16).0 as u64;
         }
     }
@@ -119,7 +119,7 @@ impl Emu {
                 .unwrap()
         } else {
             // we're a high part of an register
-            T::try_from((((self.registers[register as usize - 37] as u32) & 0xff00) >> 16) as u64)
+            T::try_from((((self.registers[register as usize - 32] as u32) & 0xff00) >> 16) as u64)
                 .unwrap()
         }
     }
@@ -790,21 +790,6 @@ impl Emu {
 pub enum Register {
     /// the intruction pointer
     RIP,
-    /// Flag register <br\>    
-    /// the flags are as outlined [here](https://en.wikipedia.org/wiki/FLAGS_register/) <br\>
-    /// mask: `1 << 0` Carry flag <br\>
-    /// mask: `1 << 1` reserverd (should be 1) <br\>
-    /// mask: `1 << 2` Parity flag <br\>
-    /// mask: `1 << 3` Reserved <br\>
-    /// mask: `1 << 4` Auxilliary Carry flag <br\>
-    /// mask: `1 << 5` Reserved <br\>
-    /// mask: `1 << 6` Zero flag <br\>
-    /// mask: `1 << 7` Sign flag <br\>
-    /// mask: `1 << 8` Trap flag <br\>
-    /// mask: `1 << 9` Interrupt enable flagi <\br>
-    /// mask: `1 << 10` direction flag <\br>
-    /// mask: `1 << 11` overflow flag <\br>
-    RFLAGS,
     /// general purpose register
     RAX,
     /// general purpose register
@@ -839,13 +824,21 @@ pub enum Register {
     R14,
     /// general purpose register
     R15,
-    // Segment Register (16 bit wide)
-    CS,
-    // Segment Register (16 bit wide)
-    FS,
-    // Segment Register (16 bit wide)
-    GS,
-
+    /// Flag register <br\>    
+    /// the flags are as outlined [here](https://en.wikipedia.org/wiki/FLAGS_register/) <br\>
+    /// mask: `1 << 0` Carry flag <br\>
+    /// mask: `1 << 1` reserverd (should be 1) <br\>
+    /// mask: `1 << 2` Parity flag <br\>
+    /// mask: `1 << 3` Reserved <br\>
+    /// mask: `1 << 4` Auxilliary Carry flag <br\>
+    /// mask: `1 << 5` Reserved <br\>
+    /// mask: `1 << 6` Zero flag <br\>
+    /// mask: `1 << 7` Sign flag <br\>
+    /// mask: `1 << 8` Trap flag <br\>
+    /// mask: `1 << 9` Interrupt enable flagi <\br>
+    /// mask: `1 << 10` direction flag <\br>
+    /// mask: `1 << 11` overflow flag <\br>
+    RFLAGS,
     // SIMD registers
     /// SIMD register, 128 bit
     Xmm0,

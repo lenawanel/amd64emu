@@ -351,7 +351,6 @@ impl MMU {
                     if hdr.p_flags & (PERM_EXEC.0 as u32) != 0 {
                         // set this to our executable region
                         exec_range = hdr.p_paddr as usize..(hdr.p_paddr + hdr.p_memsz) as usize;
-                        println!("one executable region ");
                     }
                 }
                 // if section type is INTERP, panic for now
