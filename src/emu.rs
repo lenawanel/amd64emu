@@ -267,30 +267,59 @@ impl Emu {
 
             // set the instruction pointer to the next instruction
             inc_reg!(instruction.len(), Register::RIP);
+            // TODO: get rid of boilerplate code
             match instruction.mnemonic() {
                 Mnemonic::Add => {
-                    // treat this as usize for now.
-                    // this is wrong so
-                    // TODO: handle diffrent op sizes here
-                    self.do_loar_op::<usize, _, 8>(instruction, core::ops::Add::add)?;
+                    // as documented by https://www.felixcloutier.com/x86/add
+                    macro_rules! sized_add {
+                        ($typ:ty,$size:literal) => {
+                            self.do_loar_op::<$typ, _, $size>(instruction, core::ops::Add::add)?
+                        };
+                    }
+                    match bitness(instruction) {
+                        Bitness::Eight => sized_add!(u8, 1),
+                        Bitness::Sixteen => sized_add!(u16, 2),
+                        Bitness::ThirtyTwo => sized_add!(u32, 4),
+                        Bitness::SixtyFour => sized_add!(u64, 8),
+                        Bitness::HundredTwentyEigth => sized_add!(u128, 16),
+                    }
                 }
                 Mnemonic::And => {
-                    // treat this as usize for now.
-                    // this is wrong so
-                    // TODO: handle diffrent op sizes here
-                    self.do_loar_op::<usize, _, 8>(instruction, core::ops::BitAnd::bitand)?;
+                    // as documented by https://www.felixcloutier.com/x86/and
+                    macro_rules! sized_and {
+                        ($typ:ty,$size:literal) => {
+                            self.do_loar_op::<$typ, _, $size>(
+                                instruction,
+                                core::ops::BitAnd::bitand,
+                            )?
+                        };
+                    }
+                    match bitness(instruction) {
+                        Bitness::Eight => sized_and!(u8, 1),
+                        Bitness::Sixteen => sized_and!(u16, 2),
+                        Bitness::ThirtyTwo => sized_and!(u32, 4),
+                        Bitness::SixtyFour => sized_and!(u64, 8),
+                        Bitness::HundredTwentyEigth => sized_and!(u128, 16),
+                    }
                 }
                 Mnemonic::Call => {
+                    // call as documented by https://www.felixcloutier.com/x86/call
                     // get the new ip
                     let new_ip: usize = self.get_val::<usize, 8>(instruction, 0)?;
                     println!("calling: {new_ip:#x}");
+                    // push our old ip onto the stack
                     push!(self.get_reg::<usize, 8>(Register::RIP));
+                    // set rip to the new ip and continue execution there
                     self.set_reg(new_ip, Register::RIP);
                     continue 'next_instr;
                 }
                 Mnemonic::Cmp => {
                     // TODO: make this macro more generic, so
                     // we can use it in other contexts as well
+
+                    // This is the cmp instruction as documented by https://www.felixcloutier.com/x86/cmp
+                    // note that https://www.felixcloutier.com/x86/jcc is more helpful for finding out when
+                    // to set which flag
                     macro_rules! cmp_with_type {
                         ($typ:ty) => {
                             let lhs: $typ = self.get_val(instruction, 0)?;
@@ -388,23 +417,43 @@ impl Emu {
                     self.set_val(instruction, 0, self.calc_addr(instruction))?;
                 }
                 Mnemonic::Mov => {
+                    // mov, as documented by https://www.felixcloutier.com/x86/add
                     // this is some hacky shit
-                    // also not really respecting bitness, so
-                    // TODO: respect bitness here
-                    self.do_loar_op::<usize, _, 8>(instruction, |_, x| x)?;
+                    macro_rules! sized_mov {
+                        ($typ:ty,$size:literal) => {
+                            self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
+                        };
+                    }
+                    match bitness(instruction) {
+                        Bitness::Eight => sized_mov!(u8, 1),
+                        Bitness::Sixteen => sized_mov!(u16, 2),
+                        Bitness::ThirtyTwo => sized_mov!(u32, 4),
+                        Bitness::SixtyFour => sized_mov!(u64, 8),
+                        Bitness::HundredTwentyEigth => sized_mov!(u128, 16),
+                    }
                 }
                 Mnemonic::Movd => {
-                    // this is some hacky shit
+                    // this is some hacky shit, I love it
                     // also not really respecting bitness, so
                     // TODO: respect bitness here
                     self.do_loar_op::<u32, _, 4>(instruction, |_, x| x)?;
                 }
                 Mnemonic::Movsxd => {
-                    // this is some hacky shit, I love it
-                    // also not really respecting bitness, so
-                    // TODO: respect bitness here
-                    // also let's hope that this sign extends
-                    self.do_loar_op::<isize, _, 8>(instruction, |_, x| x)?;
+                    // mov, as documented by https://www.felixcloutier.com/x86/add
+                    // this is some hacky shit
+                    // let's hope that this sign extends
+                    macro_rules! sized_mov {
+                        ($typ:ty,$size:literal) => {
+                            self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
+                        };
+                    }
+                    match bitness(instruction) {
+                        Bitness::Eight => sized_mov!(i8, 1),
+                        Bitness::Sixteen => sized_mov!(i16, 2),
+                        Bitness::ThirtyTwo => sized_mov!(i32, 4),
+                        Bitness::SixtyFour => sized_mov!(i64, 8),
+                        Bitness::HundredTwentyEigth => sized_mov!(i128, 16),
+                    }
                 }
                 Mnemonic::Movzx => {
                     // this is some hacky shit, I love it
@@ -417,9 +466,20 @@ impl Emu {
                     // it's literally a Nop
                 }
                 Mnemonic::Sub => {
-                    // also not really respecting bitness, so
-                    // TODO: respect bitness here
-                    self.do_loar_op::<isize, _, 8>(instruction, core::ops::Sub::sub)?;
+                    // sub, as documented by https://www.felixcloutier.com/x86/sub
+                    macro_rules! sized_sub {
+                        ($typ:ty,$size:literal) => {
+                            self.do_loar_op::<$typ, _, $size>(instruction, core::ops::Sub::sub)?
+                        };
+                    }
+
+                    match bitness(instruction) {
+                        Bitness::Eight => sized_sub!(u8, 1),
+                        Bitness::Sixteen => sized_sub!(u16, 2),
+                        Bitness::ThirtyTwo => sized_sub!(u32, 4),
+                        Bitness::SixtyFour => sized_sub!(u64, 8),
+                        Bitness::HundredTwentyEigth => sized_sub!(u128, 16),
+                    }
                 }
                 Mnemonic::Pop => {
                     // TODO: do bitness stuff here
@@ -471,10 +531,23 @@ impl Emu {
                     );
                 }
                 Mnemonic::Xor => {
-                    // treat this as usize for now.
-                    // this is wrong so
-                    // TODO: handle diffrent op sizes here
-                    self.do_loar_op::<usize, _, 8>(instruction, core::ops::BitOr::bitor)?;
+                    // xor, as documented by https://www.felixcloutier.com/x86/xor
+                    macro_rules! sized_xor {
+                        ($typ:ty,$size:literal) => {
+                            self.do_loar_op::<$typ, _, $size>(
+                                instruction,
+                                core::ops::BitXor::bitxor,
+                            )?
+                        };
+                    }
+
+                    match bitness(instruction) {
+                        Bitness::Eight => sized_xor!(u8, 1),
+                        Bitness::Sixteen => sized_xor!(u16, 2),
+                        Bitness::ThirtyTwo => sized_xor!(u32, 4),
+                        Bitness::SixtyFour => sized_xor!(u64, 8),
+                        Bitness::HundredTwentyEigth => sized_xor!(u128, 16),
+                    }
                 }
                 x => todo!("unsupported opcode: {x:?}"),
             };
