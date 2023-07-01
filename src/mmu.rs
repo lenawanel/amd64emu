@@ -261,12 +261,15 @@ impl MMU {
     /// this is to circumvent the restriction of using generic const expressions
     pub fn read_primitive<const N: usize>(&self, addr: Virtaddr) -> Result<[u8; N], ()> {
         // check if we are not writing past the memory buffer
-        if addr.0 + N > self.memory.len() {
+        let Some(last_addr) = addr.0.checked_add(N) else {
+            return Err(())
+        };
+        if last_addr > self.memory.len() {
             return Err(());
         }
 
         // check if we have the permission
-        if !self.permissions[addr.0..addr.0 + N]
+        if !self.permissions[addr.0..last_addr]
             .iter()
             .all(|perm| (*perm & PERM_READ).0 != 0)
         {
@@ -275,7 +278,7 @@ impl MMU {
 
         // copy the requested memory
         let mut buf = [0u8; N];
-        buf.copy_from_slice(&self.memory[addr.0..addr.0 + N]);
+        buf.copy_from_slice(&self.memory[addr.0..last_addr]);
         Ok(buf)
     }
 
