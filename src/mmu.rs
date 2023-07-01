@@ -1,7 +1,7 @@
 //! A very strict MMU with dirty page tracking
 //! credit goes to @gamozolabs
 
-use std::path::Path;
+use std::{ops::Range, path::Path};
 
 use elf::{endian::AnyEndian, ElfBytes};
 
@@ -295,10 +295,12 @@ impl MMU {
     /// load an executable into the mmu to be executed later on
     /// this function pancis if it fails in any way
     /// gievs back `(entry_point, frame_pointer)`
-    pub fn load<P: AsRef<Path>>(&mut self, filename: P) -> (Virtaddr, Virtaddr) {
+    pub fn load<P: AsRef<Path>>(&mut self, filename: P) -> (Virtaddr, Virtaddr, Range<usize>) {
         let data = std::fs::read(filename).expect("failed to read the supplied elf file");
 
         let mut last_loaded_section = 0;
+
+        let mut exec_range = Range { start: 0, end: 0 };
 
         // parse the elf
         let elf = ElfBytes::<AnyEndian>::minimal_parse(&data)
@@ -344,6 +346,13 @@ impl MMU {
                         Perm(hdr.p_flags as u8),
                     )
                     .expect("failed to set the permisssions for the loaded segement");
+                    // #[cfg(debug_assertions)]
+                    // if this section has exec permissions
+                    if hdr.p_flags & (PERM_EXEC.0 as u32) != 0 {
+                        // set this to our executable region
+                        exec_range = hdr.p_paddr as usize..(hdr.p_paddr + hdr.p_memsz) as usize;
+                        println!("one executable region ");
+                    }
                 }
                 // if section type is INTERP, panic for now
                 3 => todo!("make dynamic executables run"),
@@ -365,6 +374,7 @@ impl MMU {
         (
             Virtaddr(elf.ehdr.e_entry as usize),
             Virtaddr(last_loaded_section as usize + STACK_SIZE),
+            exec_range,
         )
     }
 

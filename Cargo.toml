@@ -6,6 +6,6 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-iced-x86 = { version = "1.19.0", default-features = false, features = ["no_std", "decoder"] }
+iced-x86 = { version = "1.19.0", default-features = false, features = ["decoder", "fast_fmt", "intel", "instr_info", "lazy_static", "std", "nasm"] }
 elf = { version = "0.7.2", default-features = false }
 # bddisasm = "0.2.1"

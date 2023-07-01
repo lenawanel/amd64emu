@@ -1,12 +1,12 @@
 use core::fmt::Debug;
-use std::{io::Write, path::Path};
+use std::{io::Write, ops::Range, path::Path, sync::Arc};
 
 // this is impossible to because of https://github.com/bitdefender/bddisasm/issues/82 ;(
 // use bddisasm::{operand::Operands, DecodedInstruction, OpInfo, Operand};
-use iced_x86::{Decoder, Instruction, Mnemonic, OpKind};
+use iced_x86::{Decoder, Formatter, Instruction, Mnemonic, NasmFormatter, OpKind};
 
 use crate::{
-    mmu::{Virtaddr, MMU},
+    mmu::{Virtaddr, MMU, PERM_EXEC},
     primitive::Primitive,
 };
 
@@ -15,15 +15,22 @@ pub struct Emu {
     registers: [u64; 21],
     simd_registers: [u128; 15],
     #[cfg(debug_assertions)]
-    stack_depth: usize,
+    pub stack_depth: usize,
+    #[cfg(debug_assertions)]
+    exec_range: Range<usize>,
 }
 
 impl Emu {
     pub fn load<P: AsRef<Path>>(&mut self, file: P) {
-        let (rip, frame) = self.memory.load(file);
+        let (rip, frame, exec_range) = self.memory.load(file);
         self.set_reg(rip.0 as u64, Register::RIP);
         self.set_reg(frame.0 as u64, Register::RSP);
         // self.set_reg(frame.0 as u64 - 8, Register::RBP);
+
+        #[cfg(debug_assertions)]
+        {
+            self.exec_range = exec_range;
+        }
 
         // Set up the program name
         let argv = self
@@ -36,16 +43,12 @@ impl Emu {
 
         macro_rules! push {
             ($expr:expr) => {
-                #[cfg(debug_assertions)]
-                {
-                    self.stack_depth += 1;
-                }
-                let sp = self.get_reg::<u64, 8>(Register::RSP) as usize;
+                let sp = self.get_reg::<u64, 8>(Register::RSP) as usize
+                    - core::mem::size_of_val(&$expr) as usize;
                 self.memory
                     .write_primitive(Virtaddr(sp), $expr)
                     .expect("Push failed");
-                self.set_reg(sp - core::mem::size_of_val(&$expr) as usize, Register::RSP);
-                // self.set_reg(sp, Register::RBP);
+                self.set_reg(sp, Register::RSP);
             };
         }
 
@@ -55,7 +58,7 @@ impl Emu {
         push!(0u64); // Argv end
         push!(argv.0); // Argv
         push!(1u64); // Argc
-                     // push!(0u64);
+                     // self.print_stack::<u64, 8>(0x28);
     }
 
     pub fn new(size: usize) -> Self {
@@ -65,6 +68,7 @@ impl Emu {
             simd_registers: [0; 15],
             #[cfg(debug_assertions)]
             stack_depth: 0,
+            exec_range: Range { start: 0, end: 0 },
         }
     }
 
@@ -74,6 +78,14 @@ impl Emu {
         <T as TryInto<u64>>::Error: Debug,
         <T as TryInto<u128>>::Error: Debug,
     {
+        #[cfg(debug_assertions)]
+        if register == Register::RSP {
+            if self.registers[Register::RSP as usize] != 0 {
+                self.stack_depth = (self.stack_depth as isize
+                    + self.registers[Register::RSP as usize] as isize
+                    - (val.to_u64() as isize)) as usize;
+            }
+        }
         if (register as u8) < self.registers.len() as u8 {
             self.registers[register as usize] = val.to_u64();
         } else {
@@ -89,7 +101,9 @@ impl Emu {
         <T as TryFrom<u128>>::Error: Debug,
     {
         if (register as u8) < self.registers.len() as u8 {
-            self.registers[register as usize].try_into().unwrap()
+            let mut bytes: [u8; BYTES] = [0; BYTES];
+            bytes.copy_from_slice(&self.registers[register as usize].to_ne_bytes()[..BYTES]);
+            T::from_ne_bytes(bytes)
         } else {
             self.simd_registers[register as usize - self.registers.len()]
                 .try_into()
@@ -114,12 +128,16 @@ impl Emu {
                 Ok(self.get_reg(reg))
             }
             OpKind::NearBranch64 => Ok(instruction.near_branch64().try_into().unwrap()),
-            OpKind::Immediate8 => todo!(),
-            OpKind::Immediate16 => todo!(),
+            OpKind::Immediate8 => T::try_from(instruction.immediate8() as u64).map_err(|_| ()),
+            OpKind::Immediate16 => T::try_from(instruction.immediate16() as u64).map_err(|_| ()),
             OpKind::Immediate32 => T::try_from(instruction.immediate32() as u64).map_err(|_| ()),
-            OpKind::Immediate64 => todo!(),
-            OpKind::Immediate8to16 => todo!(),
-            OpKind::Immediate8to32 => todo!(),
+            OpKind::Immediate64 => T::try_from(instruction.immediate64()).map_err(|_| ()),
+            OpKind::Immediate8to16 => {
+                T::try_from(instruction.immediate8to16() as u64).map_err(|_| ())
+            }
+            OpKind::Immediate8to32 => {
+                T::try_from(instruction.immediate8to32() as u64).map_err(|_| ())
+            }
             OpKind::Immediate8to64 => {
                 T::try_from(instruction.immediate8to64() as u64).map_err(|_| ())
             }
@@ -136,28 +154,53 @@ impl Emu {
         }
     }
 
-    /// print the stack, looking back length bytes
+    #[cfg(debug_assertions)]
+    /// pretty print the stack, looking `length` `T`'s down from RSP
     pub fn print_stack<T: Primitive<BYTES>, const BYTES: usize>(&self, length: usize) -> ()
     where
         usize: TryFrom<T>,
         <usize as TryFrom<T>>::Error: Debug,
+        T: TryFrom<usize>,
+        <T as TryFrom<usize>>::Error: Debug,
     {
         let stack_addr: usize = self.get_reg(Register::RSP);
         println!("\x1b[1mStack:\x1b[0m");
-        for i in (stack_addr..stack_addr + (length * BYTES)).step_by(BYTES) {
-            let val = T::from_ne_bytes(self.memory.read_primitive(Virtaddr(i)).unwrap());
+        for val in (stack_addr..stack_addr + (length)).step_by(BYTES) {
+            let mut val = T::try_from(val).unwrap();
             print!("\x1b[;91m    {val:#x?}");
-            // if the value resolves to an addres, read the first 8 bytes
-            // TODO: add symbolizer and resolve function addresses here
-            if let Ok(val) = self
+            'recursive_memory_lookup: while let Ok(new_val) = self
                 .memory
                 .read_primitive::<BYTES>(Virtaddr(usize::try_from(val).unwrap()))
             {
-                let val = T::from_ne_bytes(val);
-                println!("\x1b[0m -> \x1b[;96m{val:#x?}\x1b[0m")
-            } else {
-                println!("\x1b[0m");
+                val = T::from_ne_bytes(new_val);
+                let val_addr = usize::try_from(val).unwrap();
+                print!("\x1b[0m -> ");
+
+                // if we know this is part of a executable region
+                if self.exec_range.contains(&val_addr) {
+                    // peak 16 bytes into memory
+                    if let Ok(inst_buf) = self.memory.peek(Virtaddr(val_addr), 16, PERM_EXEC) {
+                        let decoder = Decoder::new(64, inst_buf, 0);
+                        let mut formatter = NasmFormatter::new();
+                        let mut instr_str = String::new();
+                        for inst in decoder.into_iter() {
+                            if inst.is_invalid() {
+                                // skip invalid instrucions
+                                continue;
+                            }
+                            formatter.format(&inst, &mut instr_str);
+                            // instr_str.push(' ');
+                            instr_str.push(';');
+                            instr_str.push(' ');
+                        }
+                        print!("\x1b[;96m{val:#x?}\x1b[0m -> ");
+                        print!("\x1b[38;2;255;100;0m{}\x1b[0m", instr_str);
+                        break 'recursive_memory_lookup;
+                    }
+                }
+                print!("\x1b[;96m{val:#x?}\x1b[0m");
             }
+            println!("\x1b[0m");
         }
     }
 
@@ -167,11 +210,14 @@ impl Emu {
 
             #[cfg(debug_assertions)]
             {
-                self.print_stack::<u64, 8>(self.stack_depth);
+                self.trace();
+                // self.print_stack::<u64, 8>(self.stack_depth);
                 print!("\x1b[;96mcontinue?: \x1b[0m");
-                let _ = std::io::stdout().flush();
-                let mut str = String::new();
-                let _ = std::io::stdin().read_line(&mut str);
+                if false {
+                    let _ = std::io::stdout().flush();
+                    let mut str = String::new();
+                    let _ = std::io::stdin().read_line(&mut str);
+                }
                 println!();
             }
 
@@ -205,10 +251,6 @@ impl Emu {
             }
             macro_rules! push {
                 ($expr:expr) => {
-                    #[cfg(debug_assertions)]
-                    {
-                        self.stack_depth += 1;
-                    }
                     let sp = self.get_reg::<u64, 8>(Register::RSP) as usize
                         - core::mem::size_of_val(&$expr) as usize;
                     self.memory.write_primitive(Virtaddr(sp), $expr)?;
@@ -217,17 +259,11 @@ impl Emu {
             }
             macro_rules! pop {
                 ($exp:expr) => {{
-                    #[cfg(debug_assertions)]
-                    {
-                        self.stack_depth -= 1;
-                    }
                     let sp = self.get_reg::<u64, 8>(Register::RSP) as usize;
                     self.set_reg(sp + $exp as usize, Register::RSP);
                     self.memory.read_primitive(Virtaddr(sp))?
                 }};
             }
-
-            println!("executing: {:#x?}", self.get_reg::<usize, 8>(Register::RIP));
 
             // set the instruction pointer to the next instruction
             inc_reg!(instruction.len(), Register::RIP);
@@ -253,23 +289,73 @@ impl Emu {
                     continue 'next_instr;
                 }
                 Mnemonic::Cmp => {
-                    let lhs: usize = self.get_val(instruction, 0)?;
-                    let rhs: usize = self.get_val(instruction, 0)?;
-                    // XXX: actually make this correct
-                    match lhs.cmp(&rhs) {
-                        // unset the carry flag and the zero flag if above
-                        core::cmp::Ordering::Greater => self.set_reg(
-                            /* !*/
-                            (0 << 6) | (0 << 0), /*& self.get_reg::<u64, 8>(Register::RFLAGS)*/
-                            Register::RFLAGS,
-                        ),
-                        // set the zero flag if eq
-                        core::cmp::Ordering::Equal => self.set_reg(1 << 6, Register::RFLAGS),
-                        // unset the carry flag and set the zero flag if less
-                        core::cmp::Ordering::Less => self.set_reg(
-                            (0 << 6) | (1 << 0), /*& self.get_reg::<u64, 8>(Register::RFLAGS)*/
-                            Register::RFLAGS,
-                        ),
+                    // TODO: make this macro more generic, so
+                    // we can use it in other contexts as well
+                    macro_rules! cmp_with_type {
+                        ($typ:ty) => {
+                            let lhs: $typ = self.get_val(instruction, 0)?;
+                            let rhs: $typ = self.get_val(instruction, 1)?;
+                            // XXX: actually make this correct
+                            match lhs.cmp(&rhs) {
+                                // unset the carry flag and the zero flag if above
+                                core::cmp::Ordering::Greater => self.set_reg(
+                                    /* !*/
+                                    (0 << 6) | (0 << 0), /*& self.get_reg::<u64, 8>(Register::RFLAGS)*/
+                                    Register::RFLAGS,
+                                ),
+                                // set the zero flag if eq
+                                core::cmp::Ordering::Equal => self.set_reg(1 << 6, Register::RFLAGS),
+                                // unset the carry flag and set the zero flag if less
+                                core::cmp::Ordering::Less => self.set_reg(
+                                    (0 << 6) | (1 << 0), /*& self.get_reg::<u64, 8>(Register::RFLAGS)*/
+                                    Register::RFLAGS,
+                                ),
+                            }
+                        };
+                    }
+                    match bitness(instruction) {
+                        Bitness::Eight => {
+                            cmp_with_type!(u8);
+                        }
+                        Bitness::Sixteen => {
+                            cmp_with_type!(u16);
+                        }
+                        Bitness::ThirtyTwo => {
+                            cmp_with_type!(u32);
+                        }
+                        Bitness::SixtyFour => {
+                            cmp_with_type!(u64);
+                        }
+                        Bitness::HundredTwentyEigth => {
+                            cmp_with_type!(u128);
+                        }
+                    }
+                }
+                Mnemonic::Cpuid => {
+                    // pretend we're and old intel cpu
+                    // https://de.wikipedia.org/wiki/CPUID
+                    if self.get_reg::<u32, 4>(Register::RAX) == 0 {
+                        unsafe {
+                            self.set_reg(
+                                std::mem::transmute::<[u8; 4], u32>(*b"Genu") as u32,
+                                Register::RBX,
+                            );
+                        }
+                        unsafe {
+                            self.set_reg(
+                                std::mem::transmute::<[u8; 4], u32>(*b"ineI") as u32,
+                                Register::RDX,
+                            );
+                        }
+                        unsafe {
+                            self.set_reg(
+                                std::mem::transmute::<[u8; 4], u32>(*b"ntel") as u32,
+                                Register::RCX,
+                            );
+                        }
+                    } else {
+                        // since it's easy to find, let's pretend we're a celeron m
+                        self.set_reg(0x06D8, Register::RCX);
                     }
                 }
                 Mnemonic::Endbr64 => {
@@ -284,7 +370,7 @@ impl Emu {
                 }
                 Mnemonic::Je => {
                     if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 6) != 0 {
-                        let new_ip: usize = self.get_val::<usize, 8>(instruction, 0)?;
+                        let new_ip: u64 = self.get_val::<u64, 8>(instruction, 0)?;
                         self.set_reg(new_ip, Register::RIP);
                         continue 'next_instr;
                     }
@@ -307,18 +393,25 @@ impl Emu {
                     // TODO: respect bitness here
                     self.do_loar_op::<usize, _, 8>(instruction, |_, x| x)?;
                 }
+                Mnemonic::Movd => {
+                    // this is some hacky shit
+                    // also not really respecting bitness, so
+                    // TODO: respect bitness here
+                    self.do_loar_op::<u32, _, 4>(instruction, |_, x| x)?;
+                }
                 Mnemonic::Movsxd => {
                     // this is some hacky shit, I love it
                     // also not really respecting bitness, so
                     // TODO: respect bitness here
                     // also let's hope that this sign extends
-                    self.do_loar_op::<isize, _, 8>(instruction, |x, _| x)?;
+                    self.do_loar_op::<isize, _, 8>(instruction, |_, x| x)?;
                 }
                 Mnemonic::Movzx => {
                     // this is some hacky shit, I love it
                     // also not really respecting bitness, so
                     // TODO: respect bitness here
-                    self.do_loar_op::<usize, _, 8>(instruction, |x, _| x)?;
+                    self.do_loar_op::<usize, _, 8>(instruction, |_, x| x)
+                        .unwrap();
                 }
                 Mnemonic::Nop => {
                     // it's literally a Nop
@@ -349,21 +442,23 @@ impl Emu {
                 Mnemonic::Stosq => {
                     let base_addr: usize = self.get_reg(Register::RDI);
                     let rax_val: u64 = self.get_reg(Register::RAX);
-                    println!("stosq base addr: {base_addr:#x}");
                     if instruction.has_rep_prefix() {
                         loop {
                             let index: usize = self.get_reg(Register::RCX);
 
                             self.memory
                                 .write_primitive(Virtaddr(index + base_addr), rax_val)?;
-                            if self.get_reg::<usize, 8>(Register::RCX) < 8 {
+                            if self.get_reg::<usize, 8>(Register::RCX) == 8 {
                                 continue 'next_instr;
                             }
-                            dec_reg!(8, Register::RCX);
+                            dec_reg!(1, Register::RCX);
                         }
                     } else {
                         todo!()
                     }
+                }
+                Mnemonic::Sete => {
+                    self.set_val::<u8, 1>(instruction, 0, u8::MAX)?;
                 }
                 Mnemonic::Test => {
                     let lhs: usize = self.get_val(instruction, 0)?;
@@ -371,7 +466,7 @@ impl Emu {
                     let and_res: usize = lhs & rhs;
                     self.set_reg(
                         // TODO: handle parity flag
-                        (and_res & 1 << 63) | if and_res == 0 { 1 << 6 } else { 0 << 6 },
+                        ((and_res & (1 << 63)) >> 56) | if and_res == 0 { 1 << 6 } else { 0 << 6 },
                         Register::RFLAGS,
                     );
                 }
@@ -476,48 +571,46 @@ impl Emu {
             addr
         }
     }
-}
 
-#[inline]
-fn reg_from_op_reg(reg: iced_x86::Register) -> Option<Register> {
-    use self::Register::*;
-    use iced_x86::Register;
-    match reg {
-        Register::None => None,
-        Register::RAX => Some(RAX),
-        Register::EAX => Some(RAX),
-        Register::RCX => Some(RCX),
-        Register::ECX => Some(RCX),
-        Register::RDX => Some(RDX),
-        Register::EDX => Some(RDX),
-        Register::DX => Some(RDX),
-        Register::RBX => Some(RBX),
-        Register::RSP => Some(RSP),
-        Register::RBP => Some(RBP),
-        Register::EBP => Some(RBP),
-        Register::RSI => Some(RSI),
-        Register::ESI => Some(RSI),
-        Register::RDI => Some(RDI),
-        Register::R8 => Some(R8),
-        Register::R8D => Some(R8),
-        Register::R9 => Some(R9),
-        Register::R10 => Some(R10),
-        Register::R11 => Some(R11),
-        Register::R12 => Some(R12),
-        Register::R13 => Some(R13),
-        Register::R14 => Some(R14),
-        Register::R15 => Some(R15),
-        Register::R15D => Some(R15),
-        Register::EIP => Some(RIP),
-        Register::RIP => Some(RIP),
-        x => todo!("implement register {x:?}"),
+    #[inline]
+    /// pretty print the whole register state
+    fn trace(&self) {
+        println!(
+            "\x1b[1;92m  RIP:   \x1b[0m {:#x}",
+            self.get_reg::<u64, 8>(Register::RIP)
+        );
+        println!("  Flag:   OD  SZ   P C");
+        println!(
+            "\x1b[1;92m  RFLAGS:\x1b[0m {:0>12b}",
+            self.get_reg::<u64, 8>(Register::RFLAGS)
+        );
+        // pretty print the gprs
+        for reg in (Register::RAX as u8)..=(Register::RSP as u8) {
+            let reg = unsafe { core::mem::transmute::<u8, Register>(reg) };
+            let mut val = self.get_reg::<u64, 8>(reg);
+            print!("\x1b[1;32m  {:?}:\x1b[0m {:#x}", reg, val);
+            while let Ok(new_val) = self
+                .memory
+                .read_primitive::<8>(Virtaddr(usize::try_from(val).unwrap()))
+            {
+                val = u64::from_ne_bytes(new_val);
+                print!("\x1b[0m -> \x1b[;96m{val:#x?}")
+            }
+            println!("\x1b[0m");
+        }
+        for reg in (Register::R8 as u8)..=(Register::R15 as u8) {
+            let reg = unsafe { core::mem::transmute::<u8, Register>(reg) };
+            let val = self.get_reg::<u64, 8>(reg);
+            print!("\x1b[1;32m  {:06?}:\x1b[0m {:#x}", reg, val);
+        }
+        println!()
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Register {
     /// the intruction pointer
-    RIP = 16,
+    RIP,
     /// Flag register <br\>    
     /// the flags are as outlined [here](https://en.wikipedia.org/wiki/FLAGS_register/) <br\>
     /// mask: `1 << 0` Carry flag <br\>
@@ -532,9 +625,9 @@ pub enum Register {
     /// mask: `1 << 9` Interrupt enable flagi <\br>
     /// mask: `1 << 10` direction flag <\br>
     /// mask: `1 << 11` overflow flag <\br>
-    RFLAGS = 17,
+    RFLAGS,
     /// general purpose register
-    RAX = 0,
+    RAX,
     /// general purpose register
     RBX,
     /// general purpose register
@@ -568,7 +661,7 @@ pub enum Register {
     /// general purpose register
     R15,
     // Segment Register (16 bit wide)
-    CS = 18,
+    CS,
     // Segment Register (16 bit wide)
     FS,
     // Segment Register (16 bit wide)
@@ -611,10 +704,130 @@ pub enum Register {
 
 #[derive(Clone, Copy)]
 #[repr(u8)]
-pub enum RegisterBitness {
+pub enum Bitness {
     Eight = 8,
     Sixteen = 16,
     ThirtyTwo = 32,
     SixtyFour = 64,
     HundredTwentyEigth = 128,
+}
+#[inline]
+fn reg_from_op_reg(reg: iced_x86::Register) -> Option<Register> {
+    use self::Register::*;
+    use iced_x86::Register;
+    match reg {
+        Register::None => None,
+        Register::RAX => Some(RAX),
+        Register::EAX => Some(RAX),
+        Register::AL => Some(RAX),
+        Register::RCX => Some(RCX),
+        Register::ECX => Some(RCX),
+        Register::RDX => Some(RDX),
+        Register::EDX => Some(RDX),
+        Register::DX => Some(RDX),
+        Register::DL => Some(RDX),
+        Register::RBX => Some(RBX),
+        Register::EBX => Some(RBX),
+        Register::RSP => Some(RSP),
+        Register::RBP => Some(RBP),
+        Register::EBP => Some(RBP),
+        Register::RSI => Some(RSI),
+        Register::ESI => Some(RSI),
+        Register::SIL => Some(RSI),
+        Register::RDI => Some(RDI),
+        Register::EDI => Some(RDI),
+        Register::R8 => Some(R8),
+        Register::R8D => Some(R8),
+        Register::R9 => Some(R9),
+        Register::R10 => Some(R10),
+        Register::R10D => Some(R10),
+        Register::R10L => Some(R10),
+        Register::R11 => Some(R11),
+        Register::R12 => Some(R12),
+        Register::R13 => Some(R13),
+        Register::R14 => Some(R14),
+        Register::R15 => Some(R15),
+        Register::R15D => Some(R15),
+        Register::EIP => Some(RIP),
+        Register::RIP => Some(RIP),
+        Register::XMM1 => Some(Xmm1),
+        x => todo!("implement register {x:?}"),
+    }
+}
+
+#[inline]
+fn bitness(instr: Instruction) -> Bitness {
+    match instr.op0_kind() {
+        OpKind::Register => match instr.op0_register() {
+            iced_x86::Register::AL
+            | iced_x86::Register::CL
+            | iced_x86::Register::DL
+            | iced_x86::Register::BL
+            | iced_x86::Register::AH
+            | iced_x86::Register::CH
+            | iced_x86::Register::DH
+            | iced_x86::Register::BH
+            | iced_x86::Register::SPL
+            | iced_x86::Register::BPL
+            | iced_x86::Register::SIL
+            | iced_x86::Register::DIL => Bitness::Eight,
+            iced_x86::Register::AX
+            | iced_x86::Register::CX
+            | iced_x86::Register::DX
+            | iced_x86::Register::BX
+            | iced_x86::Register::SP
+            | iced_x86::Register::BP
+            | iced_x86::Register::SI
+            | iced_x86::Register::DI => Bitness::Sixteen,
+            iced_x86::Register::EAX
+            | iced_x86::Register::ECX
+            | iced_x86::Register::EDX
+            | iced_x86::Register::EBX
+            | iced_x86::Register::ESP
+            | iced_x86::Register::EBP
+            | iced_x86::Register::ESI
+            | iced_x86::Register::EDI
+            | iced_x86::Register::EIP => Bitness::ThirtyTwo,
+            iced_x86::Register::RAX
+            | iced_x86::Register::RCX
+            | iced_x86::Register::RDX
+            | iced_x86::Register::RBX
+            | iced_x86::Register::RSP
+            | iced_x86::Register::RBP
+            | iced_x86::Register::RSI
+            | iced_x86::Register::RDI
+            | iced_x86::Register::R8
+            | iced_x86::Register::R9
+            | iced_x86::Register::R10
+            | iced_x86::Register::R11
+            | iced_x86::Register::R12
+            | iced_x86::Register::R13
+            | iced_x86::Register::R14
+            | iced_x86::Register::R15
+            | iced_x86::Register::RIP => Bitness::SixtyFour,
+            _ => todo!(),
+        },
+        OpKind::NearBranch16 => Bitness::Sixteen,
+        OpKind::NearBranch32 => Bitness::ThirtyTwo,
+        OpKind::NearBranch64 => Bitness::SixtyFour,
+        OpKind::FarBranch16 => Bitness::Sixteen,
+        OpKind::FarBranch32 => Bitness::ThirtyTwo,
+        OpKind::Immediate8 => Bitness::Eight,
+        OpKind::Immediate8to16 | OpKind::Immediate16 => Bitness::Sixteen,
+        OpKind::Immediate8to32 | OpKind::Immediate32 => Bitness::ThirtyTwo,
+        OpKind::Immediate64 | OpKind::Immediate8to64 | OpKind::Immediate32to64 => {
+            Bitness::SixtyFour
+        }
+        OpKind::Memory => match instr.memory_size() {
+            iced_x86::MemorySize::UInt8 | iced_x86::MemorySize::Int8 => Bitness::Eight,
+            iced_x86::MemorySize::UInt16 | iced_x86::MemorySize::Int16 => Bitness::Sixteen,
+            iced_x86::MemorySize::UInt32 | iced_x86::MemorySize::Int32 => Bitness::ThirtyTwo,
+            iced_x86::MemorySize::UInt64 | iced_x86::MemorySize::Int64 => Bitness::SixtyFour,
+            iced_x86::MemorySize::UInt128 | iced_x86::MemorySize::Int128 => {
+                Bitness::HundredTwentyEigth
+            }
+            x => todo!("{x:?}"),
+        },
+        x => todo!("{x:?}"),
+    }
 }
