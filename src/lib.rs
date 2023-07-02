@@ -1,3 +1,4 @@
+#![feature(portable_simd)]
 pub mod emu;
 pub mod mmu;
 pub mod primitive;

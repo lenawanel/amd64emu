@@ -1,10 +1,16 @@
+use core::fmt::Debug;
+
 pub trait Primitive<const SIZE: usize>:
     Sized
     + std::fmt::Debug
+    + TryInto<u8>
+    + TryInto<u16>
     + TryInto<u32>
     + TryInto<u64>
     + TryInto<u128>
     + TryInto<usize>
+    + TryFrom<u8>
+    + TryFrom<u16>
     + TryFrom<u32>
     + TryFrom<u64>
     + TryFrom<u128>

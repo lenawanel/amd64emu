@@ -1,5 +1,5 @@
 use core::fmt::Debug;
-use std::{io::Write, ops::Range, path::Path};
+use std::{hint::unreachable_unchecked, io::Write, ops::Range, path::Path};
 
 // this is impossible to because of https://github.com/bitdefender/bddisasm/issues/82 ;(
 // use bddisasm::{operand::Operands, DecodedInstruction, OpInfo, Operand};
@@ -13,7 +13,7 @@ use crate::{
 pub struct Emu {
     memory: MMU,
     registers: [u64; 18],
-    simd_registers: [u128; 15],
+    simd_registers: [u128; 16],
     #[cfg(debug_assertions)]
     pub stack_depth: usize,
     #[cfg(debug_assertions)]
@@ -58,16 +58,16 @@ impl Emu {
         push!(0u64); // Argv end
         push!(argv.0); // Argv
         push!(1u64); // Argc
-                     // self.print_stack::<u64, 8>(0x28);
     }
 
     pub fn new(size: usize) -> Self {
         Self {
             memory: MMU::new(size),
             registers: [0; 18],
-            simd_registers: [0; 15],
+            simd_registers: [0; 16],
             #[cfg(debug_assertions)]
             stack_depth: 0,
+            #[cfg(debug_assertions)]
             exec_range: Range { start: 0, end: 0 },
         }
     }
@@ -75,6 +75,7 @@ impl Emu {
     #[inline]
     pub fn set_reg<T: Primitive<BYTES>, const BYTES: usize>(&mut self, val: T, register: Register)
     where
+        <T as TryInto<u16>>::Error: Debug,
         <T as TryInto<u32>>::Error: Debug,
         <T as TryInto<u64>>::Error: Debug,
         <T as TryInto<u128>>::Error: Debug,
@@ -93,12 +94,12 @@ impl Emu {
             // we're a 128 bit register
             self.simd_registers[register as usize - self.registers.len()] = val.try_into().unwrap();
         } else {
-            // we're a high part of an register
+            // we're the high part of an register
             // so first mask off the unused bits
-            self.registers[register as usize - 32] &= 0xff_ff_ff_ff_00_ff;
+            self.registers[register as usize - 32] &= !0xff_00;
             // then set it to it's new value
             self.registers[register as usize - 32] |=
-                TryInto::<u32>::try_into(val).unwrap().overflowing_shl(16).0 as u64;
+                TryInto::<u16>::try_into(val).unwrap().overflowing_shl(8).0 as u64;
         }
     }
 
@@ -106,6 +107,7 @@ impl Emu {
     #[inline]
     pub fn get_reg<T: Primitive<BYTES>, const BYTES: usize>(&self, register: Register) -> T
     where
+        <T as TryFrom<u16>>::Error: Debug,
         <T as TryFrom<u64>>::Error: Debug,
         <T as TryFrom<u128>>::Error: Debug,
     {
@@ -118,9 +120,8 @@ impl Emu {
                 .try_into()
                 .unwrap()
         } else {
-            // we're a high part of an register
-            T::try_from((((self.registers[register as usize - 32] as u32) & 0xff00) >> 16) as u64)
-                .unwrap()
+            // we're the high part of a 16 bit lower register
+            T::try_from(((self.registers[register as usize - 32] as u16) & 0xff00) >> 8).unwrap()
         }
     }
 
@@ -131,6 +132,8 @@ impl Emu {
         index: u32,
     ) -> Result<T, ()>
     where
+        <T as TryFrom<u16>>::Error: Debug,
+        <T as TryFrom<u32>>::Error: Debug,
         <T as TryFrom<u64>>::Error: Debug,
         <T as TryFrom<u128>>::Error: Debug,
     {
@@ -141,16 +144,14 @@ impl Emu {
                 Ok(self.get_reg(reg))
             }
             OpKind::NearBranch64 => Ok(instruction.near_branch64().try_into().unwrap()),
-            OpKind::Immediate8 => T::try_from(instruction.immediate8() as u64).map_err(|_| ()),
-            OpKind::Immediate16 => T::try_from(instruction.immediate16() as u64).map_err(|_| ()),
-            OpKind::Immediate32 => T::try_from(instruction.immediate32() as u64).map_err(|_| ()),
+            OpKind::Immediate8 => T::try_from(instruction.immediate8()).map_err(|_| ()),
+            OpKind::Immediate16 => T::try_from(instruction.immediate16()).map_err(|_| ()),
+            OpKind::Immediate32 => T::try_from(instruction.immediate32()).map_err(|_| ()),
             OpKind::Immediate64 => T::try_from(instruction.immediate64()).map_err(|_| ()),
             OpKind::Immediate8to16 => {
-                T::try_from(instruction.immediate8to16() as u64).map_err(|_| ())
+                T::try_from(instruction.immediate8to16() as u16).map_err(|_| ())
             }
-            OpKind::Immediate8to32 => {
-                T::try_from(instruction.immediate8to32() as u64).map_err(|_| ())
-            }
+            OpKind::Immediate8to32 => Ok(T::try_from(instruction.immediate8to32() as u32).unwrap()),
             OpKind::Immediate8to64 => {
                 T::try_from(instruction.immediate8to64() as u64).map_err(|_| ())
             }
@@ -223,8 +224,10 @@ impl Emu {
 
             #[cfg(debug_assertions)]
             {
+                // cls
+                print!("\x1b[2J\x1b[1;1H");
                 self.trace();
-                self.print_stack::<u64, 8>(self.stack_depth);
+                self.print_stack::<u64, 8>((self.stack_depth - 3 * 8).min(30 * 8));
                 print!("\x1b[;96mcontinue?: \x1b[0m");
                 if false {
                     let _ = std::io::stdout().flush();
@@ -277,68 +280,181 @@ impl Emu {
                     self.memory.read_primitive(Virtaddr(sp))?
                 }};
             }
+            macro_rules! match_bitness_ts {
+                ($id:ident) => {
+                    match bitness(instruction) {
+                        Bitness::Eight => $id!(u8, 1),
+                        Bitness::Sixteen => $id!(u16, 2),
+                        Bitness::ThirtyTwo => $id!(u32, 4),
+                        Bitness::SixtyFour => $id!(u64, 8),
+                        Bitness::HundredTwentyEigth => $id!(u128, 16),
+                    }
+                };
+            }
+            macro_rules! match_bitness_typ {
+                ($id:ident) => {
+                    match bitness(instruction) {
+                        Bitness::Eight => $id!(u8),
+                        Bitness::Sixteen => $id!(u16),
+                        Bitness::ThirtyTwo => $id!(u32),
+                        Bitness::SixtyFour => $id!(u64),
+                        Bitness::HundredTwentyEigth => $id!(u128),
+                    }
+                };
+            }
+
+            macro_rules! jmp {
+                () => {
+                    // get the new ip
+                    let new_ip: u64 = self.get_val::<u64, 8>(instruction, 0)?;
+                    self.set_reg(new_ip, Register::RIP);
+                    // and jump to it
+                    continue 'next_instr;
+                };
+            }
 
             // set the instruction pointer to the next instruction
             inc_reg!(instruction.len(), Register::RIP);
             // TODO: get rid of boilerplate code
             match instruction.mnemonic() {
-                /*      |-------------------------|
+                /*
+                        +-------------------------+
                         | Arithmetic Instructions |
-                        |-------------------------|
+                        +-------------------------+
                 */
                 Mnemonic::Add => {
-                    // as documented by https://www.felixcloutier.com/x86/add
+                    // add, as documented by https://www.felixcloutier.com/x86/add
+                    let mut overflowing = false;
                     macro_rules! sized_add {
                         ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, _, $size>(instruction, core::ops::Add::add)?
+                            self.do_loar_op::<$typ, _, $size>(instruction, |x, y| {
+                                let a = x.overflowing_add(y);
+                                overflowing = a.1;
+                                a.0
+                            })?
                         };
                     }
-                    match bitness(instruction) {
-                        Bitness::Eight => sized_add!(u8, 1),
-                        Bitness::Sixteen => sized_add!(u16, 2),
-                        Bitness::ThirtyTwo => sized_add!(u32, 4),
-                        Bitness::SixtyFour => sized_add!(u64, 8),
-                        Bitness::HundredTwentyEigth => sized_add!(u128, 16),
-                    }
+                    self.set_reg::<u8, 1>(
+                        overflowing as u8 | self.get_reg::<u8, 1>(Register::RFLAGS),
+                        Register::RFLAGS,
+                    );
+
+                    match_bitness_ts!(sized_add);
                 }
                 Mnemonic::Sub => {
                     // sub, as documented by https://www.felixcloutier.com/x86/sub
+                    let mut overflowing = false;
                     macro_rules! sized_sub {
                         ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, _, $size>(instruction, core::ops::Sub::sub)?
+                            self.do_loar_op::<$typ, _, $size>(instruction, |x, y| {
+                                let a = x.overflowing_sub(y);
+                                overflowing = a.1;
+                                a.0
+                            })?
                         };
                     }
 
-                    match bitness(instruction) {
-                        Bitness::Eight => sized_sub!(u8, 1),
-                        Bitness::Sixteen => sized_sub!(u16, 2),
-                        Bitness::ThirtyTwo => sized_sub!(u32, 4),
-                        Bitness::SixtyFour => sized_sub!(u64, 8),
-                        Bitness::HundredTwentyEigth => sized_sub!(u128, 16),
+                    self.set_reg::<u8, 1>(
+                        overflowing as u8 | self.get_reg::<u8, 1>(Register::RFLAGS),
+                        Register::RFLAGS,
+                    );
+
+                    match_bitness_ts!(sized_sub)
+                }
+                Mnemonic::Sbb => {
+                    // TODO: change this to use borrowed sub
+                    let cf = self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0);
+                    macro_rules! sized_sbb {
+                        ($typ:ty,$size:literal) => {
+                            self.do_loar_op::<$typ, _, $size>(instruction, |x, y| {
+                                x - (y.wrapping_add(cf as $typ))
+                            })?
+                        };
                     }
+
+                    match_bitness_ts!(sized_sbb)
                 }
                 Mnemonic::Shr => {
                     // shr, as documented by https://www.felixcloutier.com/x86/sal:sar:shl:shr
-                    macro_rules! sized_xor {
+                    macro_rules! sized_shr {
                         ($typ:ty,$size:literal) => {
                             self.do_loar_op::<$typ, _, $size>(instruction, core::ops::Shr::shr)?
                         };
                     }
 
+                    match_bitness_ts!(sized_shr)
+                }
+                Mnemonic::Sar => {
+                    // sar, as documented by https://www.felixcloutier.com/x86/sal:sar:shl:shr
+                    // as by https://www.reddit.com/r/rust/comments/2lp3il/where_is_arithmetic_signed_rightshift,
+                    // we simply have to change our type to signed herewe simply have to change our type to signed here
+                    macro_rules! sized_shr {
+                        ($typ:ty,$size:literal) => {
+                            self.do_loar_op::<$typ, _, $size>(instruction, core::ops::Shr::shr)?
+                        };
+                    }
                     match bitness(instruction) {
-                        Bitness::Eight => sized_xor!(u8, 1),
-                        Bitness::Sixteen => sized_xor!(u16, 2),
-                        Bitness::ThirtyTwo => sized_xor!(u32, 4),
-                        Bitness::SixtyFour => sized_xor!(u64, 8),
-                        Bitness::HundredTwentyEigth => sized_xor!(u128, 16),
+                        Bitness::Eight => sized_shr!(i8, 1),
+                        Bitness::Sixteen => sized_shr!(i16, 2),
+                        Bitness::ThirtyTwo => sized_shr!(i32, 4),
+                        Bitness::SixtyFour => sized_shr!(i64, 8),
+                        Bitness::HundredTwentyEigth => sized_shr!(i128, 16),
+                    }
+                }
+                Mnemonic::Shl => {
+                    // shl, as documented by https://www.felixcloutier.com/x86/sal:sar:shl:shr
+                    macro_rules! sized_shr {
+                        ($typ:ty,$size:literal) => {
+                            self.do_loar_op::<$typ, _, $size>(instruction, core::ops::Shl::shl)?
+                        };
+                    }
+
+                    match_bitness_ts!(sized_shr)
+                }
+                Mnemonic::Imul => {
+                    let cf = match self.get_val::<u64, 8>(instruction, 2) {
+                        Ok(cf) => cf,
+                        Err(_) => 1,
+                    };
+                    macro_rules! sized_imul {
+                        ($typ:ty,$size:literal) => {
+                            self.do_loar_op::<$typ, _, $size>(instruction, |x, y| {
+                                x.wrapping_mul(y.wrapping_mul(cf as $typ))
+                            })?
+                        };
+                    }
+
+                    match_bitness_ts!(sized_imul);
+                }
+                Mnemonic::Idiv => {
+                    // TODO: handle 8 bit case
+                    macro_rules! sized_imul {
+                        ($typ:ty,$size:literal,$double_typ:ty) => {{
+                            let lhs: $double_typ = ((self.get_reg::<$typ, $size>(Register::RDX)
+                                as $double_typ)
+                                << ($size * 8))
+                                | (self.get_reg::<$typ, $size>(Register::RAX) as $double_typ);
+                            let rhs: $double_typ =
+                                self.get_val::<$typ, $size>(instruction, 0)? as $double_typ;
+                            self.set_reg::<$typ, $size>((lhs / rhs) as $typ, Register::RAX);
+                            self.set_reg::<$typ, $size>((lhs % rhs) as $typ, Register::RDX);
+                        }};
+                    }
+                    match bitness(instruction) {
+                        Bitness::Eight => todo!(),
+                        Bitness::Sixteen => sized_imul!(u16, 2, i32),
+                        Bitness::ThirtyTwo => sized_imul!(u32, 4, i64),
+                        Bitness::SixtyFour => sized_imul!(u64, 8, i128),
+                        Bitness::HundredTwentyEigth => unsafe { unreachable_unchecked() },
                     }
                 }
 
-                /*      |----------------------|
+                /*
+                        +----------------------+
                         | Logical Instructions |
-                        |----------------------|
+                        +----------------------+
                 */
-                Mnemonic::And => {
+                Mnemonic::And | Mnemonic::Pand => {
                     // as documented by https://www.felixcloutier.com/x86/and
                     macro_rules! sized_and {
                         ($typ:ty,$size:literal) => {
@@ -348,13 +464,8 @@ impl Emu {
                             )?
                         };
                     }
-                    match bitness(instruction) {
-                        Bitness::Eight => sized_and!(u8, 1),
-                        Bitness::Sixteen => sized_and!(u16, 2),
-                        Bitness::ThirtyTwo => sized_and!(u32, 4),
-                        Bitness::SixtyFour => sized_and!(u64, 8),
-                        Bitness::HundredTwentyEigth => sized_and!(u128, 16),
-                    }
+
+                    match_bitness_ts!(sized_and)
                 }
                 Mnemonic::Xor => {
                     // xor, as documented by https://www.felixcloutier.com/x86/xor
@@ -367,13 +478,7 @@ impl Emu {
                         };
                     }
 
-                    match bitness(instruction) {
-                        Bitness::Eight => sized_xor!(u8, 1),
-                        Bitness::Sixteen => sized_xor!(u16, 2),
-                        Bitness::ThirtyTwo => sized_xor!(u32, 4),
-                        Bitness::SixtyFour => sized_xor!(u64, 8),
-                        Bitness::HundredTwentyEigth => sized_xor!(u128, 16),
-                    }
+                    match_bitness_ts!(sized_xor)
                 }
                 Mnemonic::Not => {
                     macro_rules! sized_not {
@@ -382,36 +487,31 @@ impl Emu {
                             self.set_val::<$typ, $size>(instruction, 0, !val)?;
                         }};
                     }
-                    match bitness(instruction) {
-                        Bitness::Eight => sized_not!(u8, 1),
-                        Bitness::Sixteen => sized_not!(u16, 2),
-                        Bitness::ThirtyTwo => sized_not!(u32, 4),
-                        Bitness::SixtyFour => sized_not!(u64, 8),
-                        Bitness::HundredTwentyEigth => sized_not!(u128, 16),
-                    }
+
+                    match_bitness_ts!(sized_not)
                 }
                 Mnemonic::Or => {
                     // or, as documented by https://www.felixcloutier.com/x86/or
-                    macro_rules! sized_sub {
+                    macro_rules! sized_or {
                         ($typ:ty,$size:literal) => {
                             self.do_loar_op::<$typ, _, $size>(instruction, core::ops::BitOr::bitor)?
                         };
                     }
 
-                    match bitness(instruction) {
-                        Bitness::Eight => sized_sub!(u8, 1),
-                        Bitness::Sixteen => sized_sub!(u16, 2),
-                        Bitness::ThirtyTwo => sized_sub!(u32, 4),
-                        Bitness::SixtyFour => sized_sub!(u64, 8),
-                        Bitness::HundredTwentyEigth => sized_sub!(u128, 16),
-                    }
+                    match_bitness_ts!(sized_or)
+                }
+                Mnemonic::Cqo => {
+                    let val = self.get_reg::<u64, 8>(Register::RAX) as i128 as u128;
+                    self.set_reg(val as u64, Register::RAX);
+                    self.set_reg((val >> 64) as u64, Register::RDX);
                 }
 
-                /*      |---------------------------|
+                /*
+                        +---------------------------+
                         | Control Flow Instructions |
-                        |---------------------------|
+                        +---------------------------+
                 */
-                // | function  calling instructions |
+                // | function  instructions |
                 Mnemonic::Call => {
                     // call as documented by https://www.felixcloutier.com/x86/call
                     // get the new ip
@@ -427,58 +527,70 @@ impl Emu {
                     // get the new ip
                     let new_ip: u64 = u64::from_ne_bytes(pop!(8));
                     println!("ret to: {new_ip:#x}");
-                    push!(self.get_reg::<usize, 8>(Register::RIP));
                     self.set_reg(new_ip, Register::RIP);
                     continue 'next_instr;
                 }
+
                 // | jump instructions |
                 Mnemonic::Jne => {
                     if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0 {
-                        // get the new ip
-                        let new_ip: usize = self.get_val::<usize, 8>(instruction, 0)?;
-                        self.set_reg(new_ip, Register::RIP);
-                        // and jump to it
-                        continue 'next_instr;
+                        jmp!();
                     }
                 }
                 Mnemonic::Jbe => {
                     if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0
                         || self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) != 0
                     {
-                        // get the new ip
-                        let new_ip: u64 = self.get_val::<u64, 8>(instruction, 0)?;
-                        self.set_reg(new_ip, Register::RIP);
-                        // and jump to it
-                        continue 'next_instr;
+                        jmp!();
                     }
                 }
                 Mnemonic::Je => {
                     if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 6) != 0 {
-                        // get the new ip
-                        let new_ip: u64 = self.get_val::<u64, 8>(instruction, 0)?;
-                        self.set_reg(new_ip, Register::RIP);
-                        // and jump to it
-                        continue 'next_instr;
+                        jmp!();
+                    }
+                }
+                Mnemonic::Jb => {
+                    if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 0) != 0 {
+                        jmp!();
                     }
                 }
                 Mnemonic::Jle => {
+                    // if the ZF==1
                     if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0
-                        || (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 11))
-                            != ((self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 7)) << 4)
+                        // or SF!=OF
+                        || (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 11)).count_ones()
+                            != (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 7)).count_ones()
                     {
-                        // get the new ip
-                        let new_ip: u64 = self.get_val::<u64, 8>(instruction, 0)?;
-                        self.set_reg(new_ip, Register::RIP);
-                        // and jump to it
-                        continue 'next_instr;
+                        jmp!();
+                    }
+                }
+                Mnemonic::Jg => {
+                    // if ZF==0
+                    if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 6) == 0
+                        // and SF==OF
+                        && (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 11)).count_ones()
+                            == (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 7)).count_ones()
+                    {
+                        jmp!();
+                    }
+                }
+                Mnemonic::Ja => {
+                    // if ZF==0
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0
+                        // and CF==0
+                        && self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) == 0
+                    {
+                        jmp!();
+                    }
+                }
+                Mnemonic::Jae => {
+                    // if CF==0
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) == 0 {
+                        jmp!();
                     }
                 }
                 Mnemonic::Jmp => {
-                    // get the new ip
-                    let new_ip: usize = self.get_val::<usize, 8>(instruction, 0)?;
-                    self.set_reg(new_ip, Register::RIP);
-                    // and jump to it
-                    continue 'next_instr;
+                    jmp!();
                 }
 
                 // | FLAGS setting instructions |
@@ -490,7 +602,7 @@ impl Emu {
                     // note that https://www.felixcloutier.com/x86/jcc is more helpful for finding out when
                     // to set which flag
                     macro_rules! cmp_with_type {
-                        ($typ:ty) => {
+                        ($typ:ty) => {{
                             let lhs: $typ = self.get_val(instruction, 0)?;
                             let rhs: $typ = self.get_val(instruction, 1)?;
                             // XXX: actually make this correct
@@ -509,25 +621,10 @@ impl Emu {
                                     Register::RFLAGS,
                                 ),
                             }
-                        };
+                        }};
                     }
-                    match bitness(instruction) {
-                        Bitness::Eight => {
-                            cmp_with_type!(u8);
-                        }
-                        Bitness::Sixteen => {
-                            cmp_with_type!(u16);
-                        }
-                        Bitness::ThirtyTwo => {
-                            cmp_with_type!(u32);
-                        }
-                        Bitness::SixtyFour => {
-                            cmp_with_type!(u64);
-                        }
-                        Bitness::HundredTwentyEigth => {
-                            cmp_with_type!(u128);
-                        }
-                    }
+
+                    match_bitness_typ!(cmp_with_type)
                 }
                 Mnemonic::Test => {
                     let lhs: usize = self.get_val(instruction, 0)?;
@@ -540,26 +637,88 @@ impl Emu {
                     );
                 }
 
-                /*      |----------------------|
+                /*
+                        +----------------------+
                         | *mov*   Instructions |
-                        |----------------------|
+                        +----------------------+
                 */
                 Mnemonic::Cmovne => {
                     if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0 {
                         // this is some hacky shit, I love it
-                        // let's hope that this sign extends
                         macro_rules! sized_mov {
                             ($typ:ty,$size:literal) => {
                                 self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
                             };
                         }
-                        match bitness(instruction) {
-                            Bitness::Eight => sized_mov!(i8, 1),
-                            Bitness::Sixteen => sized_mov!(i16, 2),
-                            Bitness::ThirtyTwo => sized_mov!(i32, 4),
-                            Bitness::SixtyFour => sized_mov!(i64, 8),
-                            Bitness::HundredTwentyEigth => sized_mov!(i128, 16),
+
+                        match_bitness_ts!(sized_mov)
+                    }
+                }
+                Mnemonic::Cmove => {
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0 {
+                        // this is some hacky shit, I love it
+                        macro_rules! sized_mov {
+                            ($typ:ty,$size:literal) => {
+                                self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
+                            };
                         }
+
+                        match_bitness_ts!(sized_mov)
+                    }
+                }
+                Mnemonic::Cmova => {
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0
+                        // and CF==0
+                        && self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) == 0
+                    {
+                        // this is some hacky shit, I love it
+                        macro_rules! sized_mov {
+                            ($typ:ty,$size:literal) => {
+                                self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
+                            };
+                        }
+
+                        match_bitness_ts!(sized_mov)
+                    }
+                }
+                Mnemonic::Cmovae => {
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) == 0 {
+                        // this is some hacky shit, I love it
+                        macro_rules! sized_mov {
+                            ($typ:ty,$size:literal) => {
+                                self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
+                            };
+                        }
+
+                        match_bitness_ts!(sized_mov)
+                    }
+                }
+                Mnemonic::Cmovg => {
+                    if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 6) == 0
+                        // and SF==OF
+                        && (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 11)).count_ones()
+                            == (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 7)).count_ones()
+                    {
+                        // this is some hacky shit, I love it
+                        macro_rules! sized_mov {
+                            ($typ:ty,$size:literal) => {
+                                self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
+                            };
+                        }
+
+                        match_bitness_ts!(sized_mov)
+                    }
+                }
+                Mnemonic::Cmovb => {
+                    if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 0) != 0 {
+                        // this is some hacky shit, I love it
+                        macro_rules! sized_mov {
+                            ($typ:ty,$size:literal) => {
+                                self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
+                            };
+                        }
+
+                        match_bitness_ts!(sized_mov)
                     }
                 }
                 Mnemonic::Mov => {
@@ -570,17 +729,16 @@ impl Emu {
                             self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
                         };
                     }
-                    match bitness(instruction) {
-                        Bitness::Eight => sized_mov!(u8, 1),
-                        Bitness::Sixteen => sized_mov!(u16, 2),
-                        Bitness::ThirtyTwo => sized_mov!(u32, 4),
-                        Bitness::SixtyFour => sized_mov!(u64, 8),
-                        Bitness::HundredTwentyEigth => sized_mov!(u128, 16),
-                    }
+
+                    match_bitness_ts!(sized_mov)
                 }
                 Mnemonic::Movd => {
                     // this is some hacky shit, I love it
                     self.do_loar_op::<u32, _, 4>(instruction, |_, x| x)?;
+                }
+                Mnemonic::Movq => {
+                    // this is some hacky shit, I love it
+                    self.do_loar_op::<u64, _, 8>(instruction, |_, x| x)?;
                 }
                 Mnemonic::Movsxd => {
                     // movsxd, as documented by https://www.felixcloutier.com/x86/movsx:movsxd
@@ -601,54 +759,69 @@ impl Emu {
                 }
                 Mnemonic::Movzx => {
                     // this is some hacky shit, I love it
-                    // also not really respecting bitness, so
-                    // TODO: respect bitness here
-                    self.do_loar_op::<usize, _, 8>(instruction, |_, x| x)
-                        .unwrap();
+                    macro_rules! sized_mov {
+                        ($typ:ty,$size:literal) => {
+                            self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
+                        };
+                    }
+
+                    match_bitness_ts!(sized_mov)
                 }
-                /*      |----------------------|
+                /*
+                        +----------------------+
                         | Stack   Instructions |
-                        |----------------------|
+                        +----------------------+
                 */
                 Mnemonic::Pop => {
-                    // TODO: do bitness stuff here
-                    let val = usize::from_ne_bytes(pop!(8));
-                    self.set_val(instruction, 0, val)?;
+                    macro_rules! pop_sized {
+                        ($typ:ty, $size:literal) => {{
+                            let val = <$typ>::from_ne_bytes(pop!($size));
+                            self.set_val(instruction, 0, val)?;
+                        }};
+                    }
+                    match_bitness_ts!(pop_sized)
                 }
                 Mnemonic::Push => {
-                    // TODO: do bitness stuff here
-                    let val: u64 = self.get_val::<_, 8>(instruction, 0)?;
-                    push!(val);
+                    macro_rules! push_sized {
+                        ($typ:ty) => {{
+                            let val: $typ = self.get_val(instruction, 0)?;
+                            push!(val);
+                        }};
+                    }
+
+                    match_bitness_typ!(push_sized)
                 }
-                /*      |-----------------------------|
+                /*
+                        +-----------------------------+
                         | Miscellaneous  Instructions |
-                        |-----------------------------|
+                        +-----------------------------+
                 */
                 Mnemonic::Cpuid => {
                     // pretend we're and old intel cpu
                     // https://de.wikipedia.org/wiki/CPUID
-                    if self.get_reg::<u32, 4>(Register::RAX) == 0 {
+                    let ax = self.get_reg::<u8, 1>(Register::RAX);
+                    if ax == 0 {
                         unsafe {
                             self.set_reg(
-                                std::mem::transmute::<[u8; 4], u32>(*b"Genu") as u32,
+                                std::mem::transmute::<[u8; 4], u32>(*b"letn") as u32,
                                 Register::RBX,
                             );
                         }
                         unsafe {
                             self.set_reg(
-                                std::mem::transmute::<[u8; 4], u32>(*b"ineI") as u32,
+                                std::mem::transmute::<[u8; 4], u32>(*b"Ieni") as u32,
                                 Register::RDX,
                             );
                         }
                         unsafe {
                             self.set_reg(
-                                std::mem::transmute::<[u8; 4], u32>(*b"ntel") as u32,
+                                std::mem::transmute::<[u8; 4], u32>(*b"uneG") as u32,
                                 Register::RCX,
                             );
                         }
                     } else {
                         // since it's easy to find, let's pretend we're a celeron m
-                        self.set_reg(0x06D8, Register::RCX);
+                        self.set_reg(0x06EC, Register::RCX);
                     }
                 }
                 Mnemonic::Endbr64 => {
@@ -662,9 +835,10 @@ impl Emu {
                     // so TODO: inline the set_reg call performed here
                     self.set_val(instruction, 0, self.calc_addr(instruction))?;
                 }
-                /*      |-------------------------|
+                /*
+                        +-------------------------+
                         | String     Instructions |
-                        |-------------------------|
+                        +-------------------------+
                 */
                 Mnemonic::Stosq => {
                     let base_addr: usize = self.get_reg(Register::RDI);
@@ -675,7 +849,7 @@ impl Emu {
 
                             self.memory
                                 .write_primitive(Virtaddr(index + base_addr), rax_val)?;
-                            if self.get_reg::<usize, 8>(Register::RCX) == 8 {
+                            if self.get_reg::<usize, 8>(Register::RCX) == 0 {
                                 continue 'next_instr;
                             }
                             dec_reg!(1, Register::RCX);
@@ -685,35 +859,104 @@ impl Emu {
                     }
                 }
                 Mnemonic::Sete => {
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0 {
-                        self.set_val::<u8, 1>(instruction, 0, 1)?;
+                    macro_rules! sized_sete {
+                        ($typ:ty,$size:literal) => {{
+                            if self.get_reg::<$typ, $size>(Register::RFLAGS) & (1 << 6) != 0 {
+                                self.set_val::<$typ, $size>(instruction, 0, 1)?;
+                            } else {
+                                self.set_val::<$typ, $size>(instruction, 0, 0)?;
+                            }
+                        }};
                     }
+                    match_bitness_ts!(sized_sete)
                 }
-                /*      |----------------------|
+                Mnemonic::Setne => {
+                    macro_rules! sized_sete {
+                        ($typ:ty,$size:literal) => {{
+                            if self.get_reg::<$typ, $size>(Register::RFLAGS) & (1 << 6) == 0 {
+                                self.set_val::<$typ, $size>(instruction, 0, 1)?;
+                            } else {
+                                self.set_val::<$typ, $size>(instruction, 0, 0)?;
+                            }
+                        }};
+                    }
+                    match_bitness_ts!(sized_sete)
+                }
+                /*
+                        +----------------------+
                         | SIMD    Instructions |
-                        |----------------------|
+                        +----------------------+
                 */
-                Mnemonic::Punpckldq => {}
+                Mnemonic::Punpckldq => {
+                    let lhs: core::simd::Simd<u32, 2> =
+                        core::simd::Simd::<u32, 2>::from_array(unsafe {
+                            core::mem::transmute::<u64, [u32; 2]>(
+                                self.get_val::<u64, 8>(instruction, 0)?,
+                            )
+                        });
+                    let rhs: core::simd::Simd<u32, 2> =
+                        core::simd::Simd::<u32, 2>::from_array(unsafe {
+                            core::mem::transmute::<u64, [u32; 2]>(
+                                self.get_val::<u64, 8>(instruction, 1)?,
+                            )
+                        });
+                    let inter = lhs.interleave(rhs);
+                    let mut buf = [0u32; 4];
+                    inter.0.copy_to_slice(&mut buf[..2]);
+                    inter.1.copy_to_slice(&mut buf[2..4]);
+                    let new_val = unsafe { core::mem::transmute::<[u32; 4], u128>(buf) };
+                    self.set_reg(new_val, Register::Xmm1);
+                }
+                Mnemonic::Movhps => match instruction.op0_kind() {
+                    OpKind::Register => {
+                        let val: u64 = self.get_val(instruction, 0)?;
+                        self.set_val(instruction, 1, (val as u128) << 64)?;
+                    }
+                    OpKind::Memory => todo!(),
+                    _ => unsafe { unreachable_unchecked() },
+                },
+                Mnemonic::Movaps | Mnemonic::Movdqa | Mnemonic::Movups => {
+                    // this is some hacky shit, I love it
+                    self.do_loar_op::<u128, _, 16>(instruction, |_, x| x)?;
+                }
+
+                /*
+                        +---------------------------------+
+                        | Kernel interfacing Instructions |
+                        +---------------------------------+
+                */
+                Mnemonic::Syscall => {
+                    self.handle_syscall(self.get_reg(Register::RAX));
+                }
                 x => todo!("unsupported opcode: {x:?}"),
             };
         }
     }
 
+    fn handle_syscall(&mut self, nr: usize) {
+        match nr {
+            // arch_prctl (ignore this for now and see where it takes us)
+            158 => {}
+            x => todo!("syscall {x}"),
+        }
+    }
     /// perform a logical or arithmetic operation, given by `f`,on the given operands
     /// currently it will only support doing an operation on the first 2 ops
     /// it also assumes that they both are equal in size
     #[inline]
-    pub fn do_loar_op<T: Primitive<BYTES>, F: Fn(T, T) -> T, const BYTES: usize>(
+    pub fn do_loar_op<T: Primitive<BYTES>, F: FnMut(T, T) -> T, const BYTES: usize>(
         &mut self,
         instruction: Instruction,
-        f: F,
+        mut f: F,
     ) -> Result<(), ()>
     where
+        <T as TryFrom<u16>>::Error: Debug,
         <T as TryFrom<u32>>::Error: Debug,
         <T as TryFrom<u64>>::Error: Debug,
         <T as TryFrom<u128>>::Error: Debug,
-        <T as TryInto<u64>>::Error: Debug,
+        <T as TryInto<u16>>::Error: Debug,
         <T as TryInto<u32>>::Error: Debug,
+        <T as TryInto<u64>>::Error: Debug,
         <T as TryInto<u128>>::Error: Debug,
     {
         // TODO: make the caller responsible for giving the right operands
@@ -734,6 +977,7 @@ impl Emu {
         val: T,
     ) -> Result<(), ()>
     where
+        <T as TryInto<u16>>::Error: Debug,
         <T as TryInto<u32>>::Error: Debug,
         <T as TryInto<u64>>::Error: Debug,
         <T as TryInto<u128>>::Error: Debug,
@@ -744,22 +988,17 @@ impl Emu {
                 let reg: Register = reg_from_op_reg(instruction.op_register(index)).unwrap();
                 Ok(self.set_reg(val, reg))
             }
-            OpKind::NearBranch16 => todo!(),
-            OpKind::NearBranch32 => todo!(),
-            OpKind::NearBranch64 => todo!(),
-            OpKind::FarBranch16 => todo!(),
-            OpKind::FarBranch32 => todo!(),
             OpKind::Memory => {
                 let address: usize = self.calc_addr(instruction);
                 self.memory.write_primitive(Virtaddr(address), val)
             }
-            x => todo!("{x:?}"),
+            _ => unsafe { unreachable_unchecked() },
         }
     }
 
     #[inline]
     /// resolve the address an instruction uses
-    // XXX: I think there only can be one
+    // XXX: I think there only can be one such operand
     fn calc_addr(&self, mem: Instruction) -> usize {
         // check if we're addressing relative to ip
         // with PIC the compiler is going to use ip relative memory acceses
@@ -796,10 +1035,29 @@ impl Emu {
     #[inline]
     /// pretty print the whole register state
     fn trace(&self) {
-        println!(
-            "\x1b[1;92m  RIP:   \x1b[0m {:#x}",
+        print!(
+            "\x1b[1;92m  RIP:   \x1b[0m {:#x} -> ",
             self.get_reg::<u64, 8>(Register::RIP)
         );
+        if let Ok(inst_buf) = self.memory.peek(
+            Virtaddr(self.get_reg::<usize, 8>(Register::RIP)),
+            16,
+            PERM_EXEC,
+        ) {
+            let decoder = Decoder::with_ip(64, inst_buf, self.get_reg(Register::RIP), 0);
+            let mut formatter = NasmFormatter::new();
+            let mut instr_str = String::new();
+            for inst in decoder.into_iter() {
+                if inst.is_invalid() {
+                    // skip invalid instrucions
+                    continue;
+                }
+                formatter.format(&inst, &mut instr_str);
+                instr_str.push(';');
+                instr_str.push(' ');
+            }
+            println!("\x1b[38;2;255;100;0m{}\x1b[0m", instr_str);
+        }
         println!("  Flag:   OD  SZ   P C");
         println!(
             "\x1b[1;92m  RFLAGS:\x1b[0m {:0>12b}",
@@ -824,6 +1082,11 @@ impl Emu {
             let val = self.get_reg::<u64, 8>(reg);
             print!("\x1b[1;32m  {:06?}:\x1b[0m {:#x}", reg, val);
         }
+        // for reg in (Register::Xmm0 as u8)..=(Register::Xmm15 as u8) {
+        //     let reg = unsafe { core::mem::transmute::<u8, Register>(reg) };
+        //     let val = self.get_reg::<u64, 8>(reg);
+        //     print!("\x1b[1;32m  {:06?}:\x1b[0m {:#x}", reg, val);
+        // }
         println!()
     }
 }
@@ -993,6 +1256,7 @@ fn reg_from_op_reg(reg: iced_x86::Register) -> Option<Register> {
 fn bitness(instr: Instruction) -> Bitness {
     match instr.op0_kind() {
         OpKind::Register => match instr.op0_register() {
+            // https://stackoverflow.com/questions/1753602/what-are-the-names-of-the-new-x86-64-processors-registers
             iced_x86::Register::R8D
             | iced_x86::Register::R9D
             | iced_x86::Register::R10D
@@ -1013,6 +1277,7 @@ fn bitness(instr: Instruction) -> Bitness {
             | iced_x86::Register::BPL
             | iced_x86::Register::SIL
             | iced_x86::Register::DIL => Bitness::Eight,
+            iced_x86::Register::R10L => Bitness::Eight,
             iced_x86::Register::AX
             | iced_x86::Register::CX
             | iced_x86::Register::DX
@@ -1047,6 +1312,7 @@ fn bitness(instr: Instruction) -> Bitness {
             | iced_x86::Register::R14
             | iced_x86::Register::R15
             | iced_x86::Register::RIP => Bitness::SixtyFour,
+            iced_x86::Register::XMM0 => Bitness::HundredTwentyEigth,
             x => todo!("{x:?}"),
         },
         OpKind::NearBranch16 => Bitness::Sixteen,
