@@ -228,8 +228,9 @@ impl MMU {
 
     /// Allocate a region of memory as RW in the address space
     pub fn allocate(&mut self, size: usize) -> Option<Virtaddr> {
-        // 16-byte align the allocation
-        let align_size = (size + 0xf) & !0xf;
+        // 32-byte align the allocation
+        // this is required for SSE memcpy
+        let align_size = (size + 0x1f) & !0x1f;
 
         // Get the current allocation base
         let base = self.cur_alc;
@@ -249,7 +250,7 @@ impl MMU {
 
         // Mark the memory as un-initialized and writable
         if self
-            .set_permissions(base, size, PERM_RAW | PERM_WRITE)
+            .set_permissions(base, align_size, PERM_RAW | PERM_WRITE)
             .is_err()
         {
             return None;

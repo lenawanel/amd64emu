@@ -121,7 +121,7 @@ impl Emu {
                 .unwrap()
         } else {
             // we're the high part of a 16 bit lower register
-            T::try_from(((self.registers[register as usize - 32] as u16) & 0xff00) >> 8).unwrap()
+            T::try_from(((self.registers[register as usize - 32] as u16) & 0xff_00) >> 8).unwrap()
         }
     }
 
@@ -151,7 +151,9 @@ impl Emu {
             OpKind::Immediate8to16 => {
                 T::try_from(instruction.immediate8to16() as u16).map_err(|_| ())
             }
-            OpKind::Immediate8to32 => Ok(T::try_from(instruction.immediate8to32() as u32).unwrap()),
+            OpKind::Immediate8to32 => {
+                T::try_from(instruction.immediate8to32() as u32).map_err(|_| ())
+            }
             OpKind::Immediate8to64 => {
                 T::try_from(instruction.immediate8to64() as u64).map_err(|_| ())
             }
@@ -182,6 +184,7 @@ impl Emu {
         for val in (stack_addr..stack_addr + (length)).step_by(BYTES) {
             let mut val = T::try_from(val).unwrap();
             print!("\x1b[;91m    {val:#x?}");
+            let mut depth = 0;
             'recursive_memory_lookup: while let Ok(new_val) = self
                 .memory
                 .read_primitive::<BYTES>(Virtaddr(usize::try_from(val).unwrap()))
@@ -209,6 +212,10 @@ impl Emu {
                         }
                         print!("\x1b[;96m{val:#x?}\x1b[0m -> ");
                         print!("\x1b[38;2;255;100;0m{}\x1b[0m", instr_str);
+                        break 'recursive_memory_lookup;
+                    }
+                    depth += 1;
+                    if depth > 5 {
                         break 'recursive_memory_lookup;
                     }
                 }
@@ -448,6 +455,29 @@ impl Emu {
                         Bitness::HundredTwentyEigth => unsafe { unreachable_unchecked() },
                     }
                 }
+                Mnemonic::Div => {
+                    // div, as documented by https://www.felixcloutier.com/x86/div
+                    // TODO: handle 8 bit case
+                    macro_rules! sized_imul {
+                        ($typ:ty,$size:literal,$double_typ:ty) => {{
+                            let lhs: $double_typ = ((self.get_reg::<$typ, $size>(Register::RDX)
+                                as $double_typ)
+                                << ($size * 8))
+                                | (self.get_reg::<$typ, $size>(Register::RAX) as $double_typ);
+                            let rhs: $double_typ =
+                                self.get_val::<$typ, $size>(instruction, 0)? as $double_typ;
+                            self.set_reg::<$typ, $size>((lhs / rhs) as $typ, Register::RAX);
+                            self.set_reg::<$typ, $size>((lhs % rhs) as $typ, Register::RDX);
+                        }};
+                    }
+                    match bitness(instruction) {
+                        Bitness::Eight => todo!(),
+                        Bitness::Sixteen => sized_imul!(u16, 2, u32),
+                        Bitness::ThirtyTwo => sized_imul!(u32, 4, u64),
+                        Bitness::SixtyFour => sized_imul!(u64, 8, u128),
+                        Bitness::HundredTwentyEigth => unsafe { unreachable_unchecked() },
+                    }
+                }
 
                 /*
                         +----------------------+
@@ -490,6 +520,22 @@ impl Emu {
 
                     match_bitness_ts!(sized_not)
                 }
+                Mnemonic::Neg => {
+                    macro_rules! sized_neg {
+                        ($typ:ty,$size:literal) => {{
+                            let val: $typ = self.get_val(instruction, 0)?;
+                            self.set_val::<$typ, $size>(instruction, 0, -val)?;
+                        }};
+                    }
+
+                    match bitness(instruction) {
+                        Bitness::Eight => sized_neg!(i8, 1),
+                        Bitness::Sixteen => sized_neg!(i16, 2),
+                        Bitness::ThirtyTwo => sized_neg!(i32, 4),
+                        Bitness::SixtyFour => sized_neg!(i64, 8),
+                        Bitness::HundredTwentyEigth => sized_neg!(i128, 16),
+                    }
+                }
                 Mnemonic::Or => {
                     // or, as documented by https://www.felixcloutier.com/x86/or
                     macro_rules! sized_or {
@@ -504,6 +550,11 @@ impl Emu {
                     let val = self.get_reg::<u64, 8>(Register::RAX) as i128 as u128;
                     self.set_reg(val as u64, Register::RAX);
                     self.set_reg((val >> 64) as u64, Register::RDX);
+                }
+                Mnemonic::Cdqe => {
+                    let val = self.get_reg::<u32, 4>(Register::RAX) as i64 as u64;
+                    self.set_reg(val as u32, Register::RAX);
+                    self.set_reg((val >> 32) as u32, Register::RDX);
                 }
 
                 /*
@@ -586,6 +637,12 @@ impl Emu {
                 Mnemonic::Jae => {
                     // if CF==0
                     if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) == 0 {
+                        jmp!();
+                    }
+                }
+                Mnemonic::Js => {
+                    // if CF==0
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 7) != 0 {
                         jmp!();
                     }
                 }
@@ -737,8 +794,8 @@ impl Emu {
                     self.do_loar_op::<u32, _, 4>(instruction, |_, x| x)?;
                 }
                 Mnemonic::Movq => {
-                    // this is some hacky shit, I love it
-                    self.do_loar_op::<u64, _, 8>(instruction, |_, x| x)?;
+                    let val: u64 = self.get_val(instruction, 1)?;
+                    self.set_val(instruction, 0, val)?;
                 }
                 Mnemonic::Movsxd => {
                     // movsxd, as documented by https://www.felixcloutier.com/x86/movsx:movsxd
@@ -907,6 +964,11 @@ impl Emu {
                     let new_val = unsafe { core::mem::transmute::<[u32; 4], u128>(buf) };
                     self.set_reg(new_val, Register::Xmm1);
                 }
+                Mnemonic::Punpcklqdq => {
+                    self.do_loar_op::<u128, _, 16>(instruction, |x, y| {
+                        (x & (u64::MAX as u128)) | ((y & (u64::MAX as u128)) << 64)
+                    })?;
+                }
                 Mnemonic::Movhps => match instruction.op0_kind() {
                     OpKind::Register => {
                         let val: u64 = self.get_val(instruction, 0)?;
@@ -935,8 +997,21 @@ impl Emu {
 
     fn handle_syscall(&mut self, nr: usize) {
         match nr {
+            // brk
+            12 => {
+                if let Some(addr) = self.memory.allocate(self.get_reg(Register::RAX)) {
+                    self.set_reg(addr.0, Register::RAX);
+                }
+                // allocating memory failed
+                else {
+                    self.set_reg(u64::MAX, Register::RAX);
+                }
+            }
             // arch_prctl (ignore this for now and see where it takes us)
-            158 => {}
+            158 => {
+                // pretend EINVAL
+                self.set_reg(u64::MAX, Register::RAX);
+            }
             x => todo!("syscall {x}"),
         }
     }
@@ -1015,7 +1090,7 @@ impl Emu {
             // and add the resulting value to the displacement
             if let Some(index_reg) = reg_from_op_reg(mem.memory_index()) {
                 let scale = mem.memory_index_scale() as usize;
-                addr += scale * self.get_reg::<usize, 8>(index_reg);
+                addr = addr.wrapping_add(scale * self.get_reg::<usize, 8>(index_reg));
             }
             // check if there is a base register indexing the memory
             // if that is the case, add the value stored in the register to the current address
@@ -1068,12 +1143,17 @@ impl Emu {
             let reg = unsafe { core::mem::transmute::<u8, Register>(reg) };
             let mut val = self.get_reg::<u64, 8>(reg);
             print!("\x1b[1;32m  {:?}:\x1b[0m {:#x}", reg, val);
+            let mut depth = 0;
             while let Ok(new_val) = self
                 .memory
                 .read_primitive::<8>(Virtaddr(usize::try_from(val).unwrap()))
             {
                 val = u64::from_ne_bytes(new_val);
-                print!("\x1b[0m -> \x1b[;96m{val:#x?}")
+                print!("\x1b[0m -> \x1b[;96m{val:#x?}");
+                depth += 1;
+                if depth > 5 {
+                    break;
+                }
             }
             println!("\x1b[0m");
         }
