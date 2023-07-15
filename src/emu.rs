@@ -8,7 +8,7 @@ use iced_x86::{Decoder, Formatter, Instruction, Mnemonic, NasmFormatter, OpKind}
 #[cfg(debug_assertions)]
 use crate::mmu::PERM_EXEC;
 use crate::{
-    mmu::{Virtaddr, MMU},
+    mmu::{Virtaddr, MMU, PERM_READ},
     primitive::Primitive,
 };
 #[cfg(debug_assertions)]
@@ -618,13 +618,9 @@ impl Emu {
                 // | jump instructions |
                 Mnemonic::Jne => {
                     if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0 {
-                        println!("jumping to {:#x}", self.get_val::<u64, 8>(instruction, 0)?);
                         jmp!();
                     }
-                    println!(
-                        "not jumping to {:#x}",
-                        self.get_val::<u64, 8>(instruction, 0)?
-                    );
+                    println!(self.get_val::<u64, 8>(instruction, 0)?);
                 }
                 Mnemonic::Jbe => {
                     if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0
@@ -786,7 +782,6 @@ impl Emu {
                 }
                 Mnemonic::Movsxd => {
                     // movsxd, as documented by https://www.felixcloutier.com/x86/movsx:movsxd
-                    // this is some hacky shit, I love it
                     // let's hope that this sign extends
                     match bitness(instruction) {
                         Bitness::Eight => sized_mov!(i8),
@@ -970,8 +965,29 @@ impl Emu {
         }
     }
 
+    // TODO: handle memory acces errors here
     fn handle_syscall(&mut self, nr: usize) {
         match nr {
+            // write
+            1 => {
+                // get the bytes passed to write
+                let addr: u64 = self.get_reg(Register::RSI);
+                let size: u64 = self.get_reg(Register::RDX);
+                // unwrap here for now
+                let bytes = self
+                    .memory
+                    .peek(Virtaddr(addr as usize), size as usize, PERM_READ)
+                    .unwrap();
+                // if we're dealing with stdout
+                if self.get_reg::<u64, 8>(Register::RDI) == 2 {
+                    // first convert the given memory to a string
+                    let str = std::str::from_utf8(bytes).unwrap();
+                    // simply print this for now
+                    println!("{str}");
+                } else {
+                    todo!()
+                }
+            }
             // brk
             12 => {
                 let rdi: u64 = self.get_reg(Register::RDI);
@@ -987,17 +1003,13 @@ impl Emu {
                         self.set_reg(u64::MAX, Register::RAX)
                     }
                 }
-                println!(
-                    "brk({rdi:#x}) -> {:#x}",
-                    self.get_reg::<u64, 8>(Register::RAX)
-                );
             }
             // arch_prctl (ignore this for now and see where it takes us)
             158 => {
                 // we failed
                 self.set_reg(u64::MAX, Register::RAX)
             }
-            x => todo!("syscall {x}"),
+            x => todo!("syscall # {x}"),
         }
     }
     /// perform a logical or arithmetic operation, given by `f`,on the given operands
