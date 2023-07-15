@@ -326,6 +326,13 @@ impl Emu {
                 };
             }
 
+            macro_rules! sized_mov {
+                ($typ:ty) => {{
+                    let val: $typ = self.get_val(instruction, 1)?;
+                    self.set_val(instruction, 0, val)?;
+                }};
+            }
+
             // set the instruction pointer to the next instruction
             inc_reg!(instruction.len(), Register::RIP);
             // TODO: get rid of boilerplate code
@@ -732,26 +739,12 @@ impl Emu {
                 */
                 Mnemonic::Cmovne => {
                     if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0 {
-                        // this is some hacky shit, I love it
-                        macro_rules! sized_mov {
-                            ($typ:ty,$size:literal) => {
-                                self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
-                            };
-                        }
-
-                        match_bitness_ts!(sized_mov)
+                        match_bitness_typ!(sized_mov)
                     }
                 }
                 Mnemonic::Cmove => {
                     if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0 {
-                        // this is some hacky shit, I love it
-                        macro_rules! sized_mov {
-                            ($typ:ty,$size:literal) => {
-                                self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
-                            };
-                        }
-
-                        match_bitness_ts!(sized_mov)
+                        match_bitness_typ!(sized_mov)
                     }
                 }
                 Mnemonic::Cmova => {
@@ -759,26 +752,12 @@ impl Emu {
                         // and CF==0
                         && self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) == 0
                     {
-                        // this is some hacky shit, I love it
-                        macro_rules! sized_mov {
-                            ($typ:ty,$size:literal) => {
-                                self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
-                            };
-                        }
-
-                        match_bitness_ts!(sized_mov)
+                        match_bitness_typ!(sized_mov)
                     }
                 }
                 Mnemonic::Cmovae => {
                     if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) == 0 {
-                        // this is some hacky shit, I love it
-                        macro_rules! sized_mov {
-                            ($typ:ty,$size:literal) => {
-                                self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
-                            };
-                        }
-
-                        match_bitness_ts!(sized_mov)
+                        match_bitness_typ!(sized_mov)
                     }
                 }
                 Mnemonic::Cmovg => {
@@ -787,46 +766,23 @@ impl Emu {
                         && (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 11)).count_ones()
                             == (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 7)).count_ones()
                     {
-                        // this is some hacky shit, I love it
-                        macro_rules! sized_mov {
-                            ($typ:ty,$size:literal) => {
-                                self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
-                            };
-                        }
-
-                        match_bitness_ts!(sized_mov)
+                        match_bitness_typ!(sized_mov)
                     }
                 }
                 Mnemonic::Cmovb => {
                     if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 0) != 0 {
-                        // this is some hacky shit, I love it
-                        macro_rules! sized_mov {
-                            ($typ:ty,$size:literal) => {
-                                self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
-                            };
-                        }
-
-                        match_bitness_ts!(sized_mov)
+                        match_bitness_typ!(sized_mov)
                     }
                 }
                 Mnemonic::Mov => {
                     // mov, as documented by https://www.felixcloutier.com/x86/mov
-                    // this is some hacky shit
-                    macro_rules! sized_mov {
-                        ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
-                        };
-                    }
-
-                    match_bitness_ts!(sized_mov)
+                    match_bitness_typ!(sized_mov)
                 }
                 Mnemonic::Movd => {
-                    // this is some hacky shit, I love it
-                    self.do_loar_op::<u32, _, 4>(instruction, |_, x| x)?;
+                    sized_mov!(u32)
                 }
                 Mnemonic::Movq => {
-                    let val: u64 = self.get_val(instruction, 1)?;
-                    self.set_val(instruction, 0, val)?;
+                    sized_mov!(u64)
                 }
                 Mnemonic::Movsxd => {
                     // movsxd, as documented by https://www.felixcloutier.com/x86/movsx:movsxd
@@ -846,14 +802,7 @@ impl Emu {
                     }
                 }
                 Mnemonic::Movzx => {
-                    // this is some hacky shit, I love it
-                    macro_rules! sized_mov {
-                        ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
-                        };
-                    }
-
-                    match_bitness_ts!(sized_mov)
+                    match_bitness_typ!(sized_mov)
                 }
                 /*
                         +----------------------+
@@ -1151,7 +1100,7 @@ impl Emu {
     #[cfg(debug_assertions)]
     #[inline]
     /// pretty print the whole register state
-    fn trace(&self) {
+    pub fn trace(&self) {
         print!(
             "\x1b[1;92m  RIP:   \x1b[0m {:#x} -> ",
             self.get_reg::<u64, 8>(Register::RIP)

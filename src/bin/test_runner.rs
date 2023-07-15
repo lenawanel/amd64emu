@@ -6,6 +6,7 @@ pub fn main() {
     let _ = emu.run_emu();
     #[cfg(debug_assertions)]
     {
+        emu.trace();
         emu.print_stack::<u64, 8>(emu.stack_depth);
     }
 }
