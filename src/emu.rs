@@ -832,19 +832,19 @@ impl Emu {
                     if ax == 0 {
                         unsafe {
                             self.set_reg(
-                                std::mem::transmute::<[u8; 4], u32>(*b"letn") as u32,
+                                std::mem::transmute::<[u8; 4], u32>(*b"letn"),
                                 Register::RBX,
                             );
                         }
                         unsafe {
                             self.set_reg(
-                                std::mem::transmute::<[u8; 4], u32>(*b"Ieni") as u32,
+                                std::mem::transmute::<[u8; 4], u32>(*b"Ieni"),
                                 Register::RDX,
                             );
                         }
                         unsafe {
                             self.set_reg(
-                                std::mem::transmute::<[u8; 4], u32>(*b"uneG") as u32,
+                                std::mem::transmute::<[u8; 4], u32>(*b"uneG"),
                                 Register::RCX,
                             );
                         }
