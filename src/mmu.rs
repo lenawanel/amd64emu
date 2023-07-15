@@ -439,7 +439,7 @@ pub struct Virtaddr(pub usize);
 
 impl Virtaddr {
     #[inline]
-    fn to_dirty_block(&self) -> usize {
+    fn to_dirty_block(self) -> usize {
         self.0 / DIRTY_BLOCK_SIZE
     }
 }

@@ -85,12 +85,10 @@ impl Emu {
         <T as TryInto<u128>>::Error: Debug,
     {
         #[cfg(debug_assertions)]
-        if register == Register::RSP {
-            if self.registers[Register::RSP as usize] != 0 {
-                self.stack_depth = (self.stack_depth as isize
-                    + self.registers[Register::RSP as usize] as isize
-                    - (val.to_u64() as isize)) as usize;
-            }
+        if register == Register::RSP && self.registers[Register::RSP as usize] != 0 {
+            self.stack_depth = (self.stack_depth as isize
+                + self.registers[Register::RSP as usize] as isize
+                - (val.to_u64() as isize)) as usize;
         }
         if (register as u8) < self.registers.len() as u8 {
             self.registers[register as usize] = val.to_u64();
@@ -176,7 +174,7 @@ impl Emu {
 
     #[cfg(debug_assertions)]
     /// pretty print the stack, looking `length` `T`'s down from RSP
-    pub fn print_stack<T: Primitive<BYTES>, const BYTES: usize>(&self, length: usize) -> ()
+    pub fn print_stack<T: Primitive<BYTES>, const BYTES: usize>(&self, length: usize)
     where
         usize: TryFrom<T>,
         <usize as TryFrom<T>>::Error: Debug,
@@ -432,10 +430,7 @@ impl Emu {
                     match_bitness_ts!(sized_shr)
                 }
                 Mnemonic::Imul => {
-                    let cf = match self.get_val::<u64, 8>(instruction, 2) {
-                        Ok(cf) => cf,
-                        Err(_) => 1,
-                    };
+                    let cf = self.get_val::<u64, 8>(instruction, 2).unwrap_or(1);
                     macro_rules! sized_imul {
                         ($typ:ty,$size:literal) => {
                             self.do_loar_op::<$typ, _, $size>(instruction, |x, y| {
@@ -1057,7 +1052,8 @@ impl Emu {
         match opkind {
             OpKind::Register => {
                 let reg: Register = reg_from_op_reg(instruction.op_register(index)).unwrap();
-                Ok(self.set_reg(val, reg))
+                self.set_reg(val, reg);
+                Ok(())
             }
             OpKind::Memory => {
                 let address: usize = self.calc_addr(instruction);
