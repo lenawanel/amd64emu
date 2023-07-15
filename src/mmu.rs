@@ -27,6 +27,8 @@ pub const DIRTY_BLOCK_SIZE: usize = 64;
 
 const STACK_SIZE: usize = 1024 * 1014;
 
+type Result<T> = std::result::Result<T, AccessError>;
+
 impl MMU {
     pub fn new(size: usize) -> Self {
         MMU {
@@ -93,23 +95,18 @@ impl MMU {
     }
 
     /// write a buffer to a virtual adress
-    pub fn write_from(&mut self, addr: Virtaddr, buf: &[u8]) -> Result<(), ()> {
+    pub fn write_from(&mut self, addr: Virtaddr, buf: &[u8]) -> Result<()> {
         self.write_from_perms(addr, buf, PERM_WRITE)
     }
 
     /// write a buffer to a virtual adress, checking if we have the given permissions
-    pub fn write_from_perms(
-        &mut self,
-        addr: Virtaddr,
-        buf: &[u8],
-        exp_perm: Perm,
-    ) -> Result<(), ()> {
+    pub fn write_from_perms(&mut self, addr: Virtaddr, buf: &[u8], exp_perm: Perm) -> Result<()> {
         let mut has_raw = false;
 
         // check if we're not writing past the memory buffer
         // TODO: convert to checked add
         if buf.len() + addr.0 > self.memory.len() {
-            return Err(());
+            return Err(AccessError::AddrOOB);
         }
 
         // dbg!("checking permissions");
@@ -124,7 +121,7 @@ impl MMU {
         {
             println!("expected permission: {:#b}", exp_perm.0);
             println!("perm check failed");
-            return Err(());
+            return Err(AccessError::PermErr);
         }
         // dbg!("after checking permissions");
 
@@ -150,10 +147,10 @@ impl MMU {
     }
 
     /// read from a virtual address to a buffer
-    pub fn read_to(&mut self, addr: Virtaddr, buf: &mut [u8]) -> Result<(), ()> {
+    pub fn read_to(&mut self, addr: Virtaddr, buf: &mut [u8]) -> Result<()> {
         // check if we're reading past the memory buffer
         if buf.len() + addr.0 > self.memory.len() {
-            return Err(());
+            return Err(AccessError::AddrOOB);
         }
 
         // check if we have read permissions
@@ -161,7 +158,7 @@ impl MMU {
             .iter()
             .all(|&x| (x & PERM_READ).0 != 0)
         {
-            return Err(());
+            return Err(AccessError::PermErr);
         }
 
         // actually copy the memory
@@ -170,15 +167,10 @@ impl MMU {
         Ok(())
     }
     /// read from a virtual address to a buffer
-    pub fn read_to_perms(
-        &mut self,
-        addr: Virtaddr,
-        buf: &mut [u8],
-        exp_perms: Perm,
-    ) -> Result<(), ()> {
+    pub fn read_to_perms(&mut self, addr: Virtaddr, buf: &mut [u8], exp_perms: Perm) -> Result<()> {
         // check if we're reading past the memory buffer
         if buf.len() + addr.0 > self.memory.len() {
-            return Err(());
+            return Err(AccessError::AddrOOB);
         }
 
         // check if we have read permissions
@@ -186,7 +178,7 @@ impl MMU {
             .iter()
             .all(|&x| x & exp_perms == exp_perms)
         {
-            return Err(());
+            return Err(AccessError::PermErr);
         }
 
         // actually copy the memory
@@ -196,10 +188,10 @@ impl MMU {
     }
 
     /// write a primitive type to memory
-    pub fn write_primitive<T: Copy>(&mut self, addr: Virtaddr, value: T) -> Result<(), ()> {
+    pub fn write_primitive<T: Copy>(&mut self, addr: Virtaddr, value: T) -> Result<()> {
         // check if we are not writing past the memory buffer
         if addr.0 + std::mem::size_of::<T>() > self.memory.len() {
-            return Err(());
+            return Err(AccessError::AddrOOB);
         }
 
         // check if we have the permission
@@ -207,7 +199,7 @@ impl MMU {
             .iter()
             .all(|perm| (*perm & PERM_WRITE).0 != 0)
         {
-            return Err(());
+            return Err(AccessError::PermErr);
         }
 
         // acutally write the requested memory
@@ -258,13 +250,13 @@ impl MMU {
     }
     /// this function reads primitives as [u8; N],
     /// this is to circumvent the restriction of using generic const expressions
-    pub fn read_primitive<const N: usize>(&self, addr: Virtaddr) -> Result<[u8; N], ()> {
+    pub fn read_primitive<const N: usize>(&self, addr: Virtaddr) -> Result<[u8; N]> {
         // check if we are not writing past the memory buffer
         let Some(last_addr) = addr.0.checked_add(N) else {
-            return Err(());
+            return Err(AccessError::AddrOverflow);
         };
         if last_addr > self.memory.len() {
-            return Err(());
+            return Err(AccessError::AddrOOB);
         }
 
         // check if we have the permission
@@ -272,7 +264,7 @@ impl MMU {
             .iter()
             .all(|perm| (*perm & PERM_READ).0 != 0)
         {
-            return Err(());
+            return Err(AccessError::PermErr);
         }
 
         // copy the requested memory
@@ -282,13 +274,13 @@ impl MMU {
     }
 
     /// get acces to a mutable slice of memory
-    pub fn peek(&self, addr: Virtaddr, size: usize, exp_perms: Perm) -> Result<&[u8], ()> {
+    pub fn peek(&self, addr: Virtaddr, size: usize, exp_perms: Perm) -> Result<&[u8]> {
         // check if we have the permission
         if !self.permissions[addr.0..addr.0 + size]
             .iter()
             .all(|perm| (*perm & exp_perms).0 != 0)
         {
-            return Err(());
+            return Err(AccessError::PermErr);
         }
 
         Ok(&self.memory[addr.0..addr.0 + size])
@@ -407,17 +399,17 @@ impl MMU {
     /// at the the virtual address located at `addr`
     /// this function will fail if either we have an overflow by adding `size` to `addr` or
     /// `size` + `addr` is out of our memory space
-    fn set_permissions(&mut self, addr: Virtaddr, size: usize, perms: Perm) -> Result<(), ()> {
+    fn set_permissions(&mut self, addr: Virtaddr, size: usize, perms: Perm) -> Result<()> {
         // nothing to do, just continue
         if size == 0 {
             return Ok(());
         }
 
         let Some(end_addr) = addr.0.checked_add(size) else {
-            return Err(());
+            return Err(AccessError::AddrOverflow);
         };
         let Some(region) = self.permissions.get_mut(addr.0..end_addr) else {
-            return Err(());
+            return Err(AccessError::PermErr);
         };
         region.iter_mut().for_each(|x| *x = perms);
 
@@ -442,6 +434,19 @@ impl Virtaddr {
     fn to_dirty_block(self) -> usize {
         self.0 / DIRTY_BLOCK_SIZE
     }
+}
+
+/// error type for memory acces operations
+#[derive(Debug, Clone, Copy)]
+pub enum AccessError {
+    /// We had an overflow when trying to get
+    /// the end of the region to access
+    AddrOverflow,
+    /// We tried to acces past the memory buffer
+    AddrOOB,
+    /// We tried to acces memory without the
+    /// needed permissions
+    PermErr,
 }
 
 #[repr(transparent)]
