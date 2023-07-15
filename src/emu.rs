@@ -620,7 +620,6 @@ impl Emu {
                     if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0 {
                         jmp!();
                     }
-                    println!(self.get_val::<u64, 8>(instruction, 0)?);
                 }
                 Mnemonic::Jbe => {
                     if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0
