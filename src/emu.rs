@@ -8,7 +8,7 @@ use iced_x86::{Decoder, Formatter, Instruction, Mnemonic, NasmFormatter, OpKind}
 #[cfg(debug_assertions)]
 use crate::mmu::PERM_EXEC;
 use crate::{
-    mmu::{Virtaddr, MMU, PERM_READ},
+    mmu::{AccessError, Virtaddr, MMU, PERM_READ},
     primitive::Primitive,
 };
 #[cfg(debug_assertions)]
@@ -23,6 +23,12 @@ pub struct Emu {
     #[cfg(debug_assertions)]
     exec_range: Range<usize>,
 }
+
+// TODO: avoid this
+#[thread_local]
+static mut IP: u64 = 0;
+
+type Result<T> = std::result::Result<T, ExecErr>;
 
 impl Emu {
     pub fn load<P: AsRef<Path>>(&mut self, file: P) {
@@ -132,8 +138,9 @@ impl Emu {
         &self,
         instruction: Instruction,
         index: u32,
-    ) -> Result<T, ()>
+    ) -> Result<T>
     where
+        <T as TryFrom<u8>>::Error: Debug,
         <T as TryFrom<u16>>::Error: Debug,
         <T as TryFrom<u32>>::Error: Debug,
         <T as TryFrom<u64>>::Error: Debug,
@@ -146,27 +153,27 @@ impl Emu {
                 Ok(self.get_reg(reg))
             }
             OpKind::NearBranch64 => Ok(instruction.near_branch64().try_into().unwrap()),
-            OpKind::Immediate8 => T::try_from(instruction.immediate8()).map_err(|_| ()),
-            OpKind::Immediate16 => T::try_from(instruction.immediate16()).map_err(|_| ()),
-            OpKind::Immediate32 => T::try_from(instruction.immediate32()).map_err(|_| ()),
-            OpKind::Immediate64 => T::try_from(instruction.immediate64()).map_err(|_| ()),
-            OpKind::Immediate8to16 => {
-                T::try_from(instruction.immediate8to16() as u16).map_err(|_| ())
-            }
-            OpKind::Immediate8to32 => {
-                T::try_from(instruction.immediate8to32() as u32).map_err(|_| ())
-            }
-            OpKind::Immediate8to64 => {
-                T::try_from(instruction.immediate8to64() as u64).map_err(|_| ())
-            }
+            OpKind::Immediate8 => Ok(T::try_from(instruction.immediate8()).unwrap()),
+            OpKind::Immediate16 => Ok(T::try_from(instruction.immediate16()).unwrap()),
+            OpKind::Immediate32 => Ok(T::try_from(instruction.immediate32()).unwrap()),
+            OpKind::Immediate64 => Ok(T::try_from(instruction.immediate64()).unwrap()),
+            OpKind::Immediate8to16 => Ok(T::try_from(instruction.immediate8to16() as u16)
+                .map_err(|_| ())
+                .unwrap()),
+            OpKind::Immediate8to32 => Ok(T::try_from(instruction.immediate8to32() as u32)
+                .map_err(|_| ())
+                .unwrap()),
+            OpKind::Immediate8to64 => Ok(T::try_from(instruction.immediate8to64() as u64).unwrap()),
             OpKind::Immediate32to64 => {
-                T::try_from(instruction.immediate32to64() as u64).map_err(|_| ())
+                Ok(T::try_from(instruction.immediate32to64() as u64).unwrap())
             }
             OpKind::Memory => {
                 let address: usize = self.calc_addr(instruction);
-                self.memory
+                Ok(self
+                    .memory
                     .read_primitive(Virtaddr(address))
                     .map(T::from_ne_bytes)
+                    .unwrap())
             }
             x => todo!("{x:?}"),
         }
@@ -227,7 +234,7 @@ impl Emu {
         }
     }
 
-    pub fn run_emu(&mut self) -> Result<(), ()> {
+    pub fn run_emu(&mut self) -> Result<()> {
         #[cfg(debug_assertions)]
         let mut call_depth = 0;
         'next_instr: loop {
@@ -257,6 +264,7 @@ impl Emu {
                 Virtaddr(self.get_reg::<usize, 8>(Register::RIP)),
                 &mut inst_buf,
             )?;
+            unsafe { IP = self.get_reg(Register::RIP) };
 
             // TODO: support 32 bit mode
             let instruction =
@@ -1014,8 +1022,9 @@ impl Emu {
         &mut self,
         instruction: Instruction,
         mut f: F,
-    ) -> Result<(), ()>
+    ) -> Result<()>
     where
+        <T as TryFrom<u8>>::Error: Debug,
         <T as TryFrom<u16>>::Error: Debug,
         <T as TryFrom<u32>>::Error: Debug,
         <T as TryFrom<u64>>::Error: Debug,
@@ -1041,7 +1050,7 @@ impl Emu {
         instruction: Instruction,
         index: u32,
         val: T,
-    ) -> Result<(), ()>
+    ) -> Result<()>
     where
         <T as TryInto<u16>>::Error: Debug,
         <T as TryInto<u32>>::Error: Debug,
@@ -1057,7 +1066,7 @@ impl Emu {
             }
             OpKind::Memory => {
                 let address: usize = self.calc_addr(instruction);
-                self.memory.write_primitive(Virtaddr(address), val)
+                Ok(self.memory.write_primitive(Virtaddr(address), val)?)
             }
             _ => unsafe { unreachable_unchecked() },
         }
@@ -1161,6 +1170,20 @@ impl Emu {
         //     print!("\x1b[1;32m  {:06?}:\x1b[0m {:#x}", reg, val);
         // }
         println!()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ExecErr {
+    AccErr { error: AccessError, ip: u64 },
+}
+
+impl From<AccessError> for ExecErr {
+    fn from(value: AccessError) -> Self {
+        ExecErr::AccErr {
+            error: value,
+            ip: unsafe { IP },
+        }
     }
 }
 

@@ -1,4 +1,5 @@
 #![feature(portable_simd)]
+#![feature(thread_local)]
 pub mod emu;
 pub mod mmu;
 pub mod primitive;
