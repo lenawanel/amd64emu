@@ -5,6 +5,8 @@ use std::{ops::Range, path::Path};
 
 use elf::{endian::AnyEndian, ElfBytes};
 
+use crate::symbol_table::SymbolTable;
+
 pub struct MMU {
     memory: Vec<u8>,
     permissions: Vec<Perm>,
@@ -12,7 +14,9 @@ pub struct MMU {
     dirty_pages: Vec<usize>,
     dirty_bitmap: Vec<u64>,
 
-    cur_alc: Virtaddr,
+    pub cur_alc: Virtaddr,
+
+    symbol_table: SymbolTable,
 }
 
 /// Block size used for resetting and tracking memory which has been modified
@@ -31,6 +35,7 @@ impl MMU {
             dirty_pages: Vec::with_capacity(size / DIRTY_BLOCK_SIZE + 1),
             dirty_bitmap: vec![0u64; size / DIRTY_BLOCK_SIZE / 64 + 1],
             cur_alc: Virtaddr(0x10000),
+            symbol_table: SymbolTable::new(),
         }
     }
 
@@ -44,6 +49,7 @@ impl MMU {
             dirty_pages: Vec::with_capacity(size / DIRTY_BLOCK_SIZE + 1),
             dirty_bitmap: vec![0; size / DIRTY_BLOCK_SIZE / 64 + 1],
             cur_alc: self.cur_alc,
+            symbol_table: SymbolTable::new(),
         }
     }
 
@@ -116,10 +122,7 @@ impl MMU {
                 (x & exp_perm).0 != 0
             })
         {
-            println!(
-                "expected permission: {:#b}, got: {:#b}",
-                exp_perm.0, self.permissions[addr.0].0
-            );
+            println!("expected permission: {:#b}", exp_perm.0);
             println!("perm check failed");
             return Err(());
         }
@@ -235,12 +238,7 @@ impl MMU {
         // Get the current allocation base
         let base = self.cur_alc;
 
-        // Cannot allocate
-        if base.0 >= self.memory.len() {
-            return None;
-        }
-
-        // Update the allocation size
+        // Update the allocation address
         self.cur_alc = Virtaddr(self.cur_alc.0.checked_add(align_size)?);
 
         // Could not satisfy allocation without going OOM
@@ -256,14 +254,14 @@ impl MMU {
             return None;
         }
 
-        Some(base)
+        Some(self.cur_alc)
     }
     /// this function reads primitives as [u8; N],
     /// this is to circumvent the restriction of using generic const expressions
     pub fn read_primitive<const N: usize>(&self, addr: Virtaddr) -> Result<[u8; N], ()> {
         // check if we are not writing past the memory buffer
         let Some(last_addr) = addr.0.checked_add(N) else {
-            return Err(())
+            return Err(());
         };
         if last_addr > self.memory.len() {
             return Err(());
@@ -296,6 +294,10 @@ impl MMU {
         Ok(&self.memory[addr.0..addr.0 + size])
     }
 
+    pub fn get_sym(&self, addr: usize) -> &str {
+        self.symbol_table.get(&addr).unwrap()
+    }
+
     /// load an executable into the mmu to be executed later on
     /// this function pancis if it fails in any way
     /// gievs back `(entry_point, frame_pointer)`
@@ -309,6 +311,15 @@ impl MMU {
         // parse the elf
         let elf = ElfBytes::<AnyEndian>::minimal_parse(&data)
             .expect("failed to parse the supplied elf file");
+
+        // get the symbol table
+        let (sym_tab, string_tab) = elf.symbol_table().unwrap().unwrap();
+        for symbol in sym_tab {
+            let name = string_tab.get(symbol.st_name as usize).unwrap();
+            let addr = symbol.st_value;
+            self.symbol_table.insert(addr as usize, name.to_string());
+        }
+
         for hdr in elf
             .segments()
             .expect("failed parsing program headers of the elf")
@@ -322,6 +333,12 @@ impl MMU {
                         PERM_WRITE,
                     )
                     .expect("failed to make program memory writable");
+
+                    println!(
+                        "loading section to: {:#x}...{:#x}",
+                        hdr.p_vaddr,
+                        hdr.p_vaddr + hdr.p_filesz
+                    );
 
                     // load the section to the correct virtual adresses
                     self.write_from(
@@ -341,7 +358,8 @@ impl MMU {
                         .expect("somehow faild to apply padding to elf section");
                     }
 
-                    last_loaded_section = std::cmp::max(hdr.p_vaddr, last_loaded_section);
+                    last_loaded_section =
+                        std::cmp::max(hdr.p_vaddr + hdr.p_filesz, last_loaded_section);
 
                     // set the correct permissions
                     self.set_permissions(
@@ -373,10 +391,14 @@ impl MMU {
         )
         .expect("failed to allocate stack");
 
+        print!("stack is at: {:#x}", last_loaded_section as usize);
+        self.cur_alc = Virtaddr(last_loaded_section as usize + STACK_SIZE + 16);
+        println!("...{:#x}", self.cur_alc.0);
+
         // get the entry point and return it to the emulator
         (
             Virtaddr(elf.ehdr.e_entry as usize),
-            Virtaddr(last_loaded_section as usize + STACK_SIZE),
+            Virtaddr(last_loaded_section as usize + STACK_SIZE + 16),
             exec_range,
         )
     }
@@ -391,8 +413,12 @@ impl MMU {
             return Ok(());
         }
 
-        let Some(end_addr) = addr.0.checked_add(size) else { return Err(())};
-        let Some(region) = self.permissions.get_mut(addr.0..end_addr) else {return Err(());};
+        let Some(end_addr) = addr.0.checked_add(size) else {
+            return Err(());
+        };
+        let Some(region) = self.permissions.get_mut(addr.0..end_addr) else {
+            return Err(());
+        };
         region.iter_mut().for_each(|x| *x = perms);
 
         // compute the dirty bit blocks

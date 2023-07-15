@@ -1,14 +1,18 @@
 use core::fmt::Debug;
-use std::{hint::unreachable_unchecked, io::Write, ops::Range, path::Path};
+use std::{hint::unreachable_unchecked, path::Path};
 
 // this is impossible to because of https://github.com/bitdefender/bddisasm/issues/82 ;(
 // use bddisasm::{operand::Operands, DecodedInstruction, OpInfo, Operand};
 use iced_x86::{Decoder, Formatter, Instruction, Mnemonic, NasmFormatter, OpKind};
 
+#[cfg(debug_assertions)]
+use crate::mmu::PERM_EXEC;
 use crate::{
-    mmu::{Virtaddr, MMU, PERM_EXEC},
+    mmu::{Virtaddr, MMU},
     primitive::Primitive,
 };
+#[cfg(debug_assertions)]
+use std::{io::Write, ops::Range};
 
 pub struct Emu {
     memory: MMU,
@@ -38,7 +42,7 @@ impl Emu {
             .allocate(8)
             .expect("Failed to allocate program name");
         self.memory
-            .write_from(argv, b"test\0")
+            .write_from(Virtaddr(argv.0 - 8), b"test\0")
             .expect("Failed to write program name");
 
         macro_rules! push {
@@ -226,11 +230,13 @@ impl Emu {
     }
 
     pub fn run_emu(&mut self) -> Result<(), ()> {
+        #[cfg(debug_assertions)]
+        let mut call_depth = 0;
         'next_instr: loop {
             // we have to look ahead 16 bytes into memory since that's the maximum size of x86 instructions
 
             #[cfg(debug_assertions)]
-            {
+            if false {
                 // cls
                 print!("\x1b[2J\x1b[1;1H");
                 self.trace();
@@ -567,7 +573,17 @@ impl Emu {
                     // call as documented by https://www.felixcloutier.com/x86/call
                     // get the new ip
                     let new_ip: usize = self.get_val::<usize, 8>(instruction, 0)?;
-                    println!("calling: {new_ip:#x}");
+                    #[cfg(debug_assertions)]
+                    {
+                        call_depth += 1;
+                        let sym = self.memory.get_sym(new_ip);
+                        println!(
+                            "{:\t<1$}{sym} called from: {ip:#x}",
+                            "",
+                            call_depth,
+                            ip = self.get_reg::<usize, 8>(Register::RIP)
+                        );
+                    }
                     // push our old ip onto the stack
                     push!(self.get_reg::<usize, 8>(Register::RIP));
                     // set rip to the new ip and continue execution there
@@ -577,7 +593,17 @@ impl Emu {
                 Mnemonic::Ret => {
                     // get the new ip
                     let new_ip: u64 = u64::from_ne_bytes(pop!(8));
-                    println!("ret to: {new_ip:#x}");
+                    #[cfg(debug_assertions)]
+                    {
+                        // println!("{:\t<1$}ret to: {new_ip:#x}", "", call_depth);
+                        println!(
+                            "{:\t<1$}⮡ {rax:#x}",
+                            "",
+                            call_depth,
+                            rax = self.get_reg::<usize, 8>(Register::RAX)
+                        );
+                        call_depth -= 1;
+                    }
                     self.set_reg(new_ip, Register::RIP);
                     continue 'next_instr;
                 }
@@ -585,8 +611,13 @@ impl Emu {
                 // | jump instructions |
                 Mnemonic::Jne => {
                     if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0 {
+                        println!("jumping to {:#x}", self.get_val::<u64, 8>(instruction, 0)?);
                         jmp!();
                     }
+                    println!(
+                        "not jumping to {:#x}",
+                        self.get_val::<u64, 8>(instruction, 0)?
+                    );
                 }
                 Mnemonic::Jbe => {
                     if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0
@@ -978,8 +1009,8 @@ impl Emu {
                     _ => unsafe { unreachable_unchecked() },
                 },
                 Mnemonic::Movaps | Mnemonic::Movdqa | Mnemonic::Movups => {
-                    // this is some hacky shit, I love it
-                    self.do_loar_op::<u128, _, 16>(instruction, |_, x| x)?;
+                    let val: u128 = self.get_val(instruction, 1)?;
+                    self.set_val(instruction, 0, val).unwrap();
                 }
 
                 /*
@@ -999,18 +1030,28 @@ impl Emu {
         match nr {
             // brk
             12 => {
-                if let Some(addr) = self.memory.allocate(self.get_reg(Register::RAX)) {
-                    self.set_reg(addr.0, Register::RAX);
+                let rdi: u64 = self.get_reg(Register::RDI);
+                if rdi == 0 {
+                    self.set_reg(self.memory.cur_alc.0, Register::RAX);
+                } else {
+                    // ignore deallocations for now
+                    if let Some(addr) = self.memory.allocate(rdi as usize - self.memory.cur_alc.0) {
+                        self.set_reg(addr.0, Register::RAX)
+                    }
+                    // allocating memory failed
+                    else {
+                        self.set_reg(u64::MAX, Register::RAX)
+                    }
                 }
-                // allocating memory failed
-                else {
-                    self.set_reg(u64::MAX, Register::RAX);
-                }
+                println!(
+                    "brk({rdi:#x}) -> {:#x}",
+                    self.get_reg::<u64, 8>(Register::RAX)
+                );
             }
             // arch_prctl (ignore this for now and see where it takes us)
             158 => {
-                // pretend EINVAL
-                self.set_reg(u64::MAX, Register::RAX);
+                // we failed
+                self.set_reg(u64::MAX, Register::RAX)
             }
             x => todo!("syscall {x}"),
         }
@@ -1107,6 +1148,7 @@ impl Emu {
         }
     }
 
+    #[cfg(debug_assertions)]
     #[inline]
     /// pretty print the whole register state
     fn trace(&self) {

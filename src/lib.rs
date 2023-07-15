@@ -2,6 +2,7 @@
 pub mod emu;
 pub mod mmu;
 pub mod primitive;
+mod symbol_table;
 
 #[cfg(test)]
 mod tests {

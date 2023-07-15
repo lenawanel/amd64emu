@@ -1,5 +1,3 @@
-use core::fmt::Debug;
-
 pub trait Primitive<const SIZE: usize>:
     Sized
     + std::fmt::Debug
