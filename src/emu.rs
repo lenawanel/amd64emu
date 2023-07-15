@@ -788,17 +788,12 @@ impl Emu {
                     // movsxd, as documented by https://www.felixcloutier.com/x86/movsx:movsxd
                     // this is some hacky shit, I love it
                     // let's hope that this sign extends
-                    macro_rules! sized_mov {
-                        ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, _, $size>(instruction, |_, x| x)?
-                        };
-                    }
                     match bitness(instruction) {
-                        Bitness::Eight => sized_mov!(i8, 1),
-                        Bitness::Sixteen => sized_mov!(i16, 2),
-                        Bitness::ThirtyTwo => sized_mov!(i32, 4),
-                        Bitness::SixtyFour => sized_mov!(i64, 8),
-                        Bitness::HundredTwentyEigth => sized_mov!(i128, 16),
+                        Bitness::Eight => sized_mov!(i8),
+                        Bitness::Sixteen => sized_mov!(i16),
+                        Bitness::ThirtyTwo => sized_mov!(i32),
+                        Bitness::SixtyFour => sized_mov!(i64),
+                        Bitness::HundredTwentyEigth => sized_mov!(i128),
                     }
                 }
                 Mnemonic::Movzx => {
