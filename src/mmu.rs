@@ -31,7 +31,7 @@ type Result<T> = std::result::Result<T, AccessError>;
 
 impl MMU {
     pub fn new(size: usize) -> Self {
-        MMU {
+        Self {
             memory: vec![0; size],
             permissions: vec![Perm(0); size],
             dirty_pages: Vec::with_capacity(size / DIRTY_BLOCK_SIZE + 1),
@@ -45,7 +45,7 @@ impl MMU {
     pub fn fork(&self) -> Self {
         let size = self.memory.len();
 
-        MMU {
+        Self {
             memory: self.memory.clone(),
             permissions: self.permissions.clone(),
             dirty_pages: Vec::with_capacity(size / DIRTY_BLOCK_SIZE + 1),
@@ -57,7 +57,7 @@ impl MMU {
 
     /// Restores memory back to the original state (eg. restores all dirty
     /// blocks to the state of `other`)
-    pub fn reset(&mut self, other: &MMU) {
+    pub fn reset(&mut self, other: &Self) {
         for &block in &self.dirty_pages {
             let start = block * DIRTY_BLOCK_SIZE;
             let end = (block + 1) * DIRTY_BLOCK_SIZE;
@@ -431,7 +431,7 @@ pub struct Virtaddr(pub usize);
 
 impl Virtaddr {
     #[inline]
-    fn to_dirty_block(self) -> usize {
+    const fn to_dirty_block(self) -> usize {
         self.0 / DIRTY_BLOCK_SIZE
     }
 }

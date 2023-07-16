@@ -185,7 +185,6 @@ impl Emu {
     where
         usize: TryFrom<T>,
         <usize as TryFrom<T>>::Error: Debug,
-        T: TryFrom<usize>,
         <T as TryFrom<usize>>::Error: Debug,
     {
         let stack_addr: usize = self.get_reg(Register::RSP);
@@ -1182,7 +1181,7 @@ pub enum ExecErr {
 
 impl From<AccessError> for ExecErr {
     fn from(value: AccessError) -> Self {
-        ExecErr::AccErr {
+        Self::AccErr {
             error: value,
             ip: unsafe { IP },
         }
