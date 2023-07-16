@@ -1,5 +1,5 @@
-use core::fmt::Debug;
-use std::{hint::unreachable_unchecked, path::Path};
+use core::{fmt::Debug, hint::unreachable_unchecked};
+use std::path::Path;
 
 // this is impossible to because of https://github.com/bitdefender/bddisasm/issues/82 ;(
 // use bddisasm::{operand::Operands, DecodedInstruction, OpInfo, Operand};

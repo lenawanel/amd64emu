@@ -1,7 +1,8 @@
 //! A very strict MMU with dirty page tracking
 //! credit goes to @gamozolabs
 
-use std::{ops::Range, path::Path};
+use core::ops::Range;
+use std::path::Path;
 
 use elf::{endian::AnyEndian, ElfBytes};
 

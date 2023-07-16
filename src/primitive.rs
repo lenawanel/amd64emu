@@ -1,6 +1,6 @@
 pub trait Primitive<const SIZE: usize>:
     Sized
-    + std::fmt::Debug
+    + core::fmt::Debug
     + TryInto<u8>
     + TryInto<u16>
     + TryInto<u32>
@@ -25,10 +25,11 @@ pub trait Primitive<const SIZE: usize>:
 macro_rules! impl_primitive {
     ($type:ty,$bytes:expr) => {
         impl Primitive<$bytes> for $type {
+            #[inline(always)]
             fn to_u64(self) -> u64 {
                 self as u64
             }
-
+            #[inline(always)]
             fn from_ne_bytes(bytes: [u8; $bytes]) -> Self {
                 // assert!(size == $bytes);
                 // let bytes = unsafe { core::mem::transmute::<[u8; size], [u8; $bytes]>(bytes) };
