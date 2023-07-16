@@ -9,5 +9,5 @@ pub fn main() {
         emu.trace();
         emu.print_stack::<u64, 8>(emu.stack_depth);
     }
-    res.unwrap();
+    println!("exec result: {res:#x?}");
 }

@@ -960,29 +960,27 @@ impl Emu {
                         +---------------------------------+
                 */
                 Mnemonic::Syscall => {
-                    self.handle_syscall(self.get_reg(Register::RAX));
+                    self.handle_syscall(self.get_reg(Register::RAX))?;
                 }
                 x => todo!("unsupported opcode: {x:?}"),
             };
         }
     }
 
-    // TODO: handle memory acces errors here
-    fn handle_syscall(&mut self, nr: usize) {
+    fn handle_syscall(&mut self, nr: usize) -> Result<()> {
         match nr {
             // write
             1 => {
                 // get the bytes passed to write
                 let addr: u64 = self.get_reg(Register::RSI);
                 let size: u64 = self.get_reg(Register::RDX);
-                // unwrap here for now
                 let bytes = self
                     .memory
-                    .peek(Virtaddr(addr as usize), size as usize, PERM_READ)
-                    .unwrap();
+                    .peek(Virtaddr(addr as usize), size as usize, PERM_READ)?;
                 // if we're dealing with stdout
                 if self.get_reg::<u64, 8>(Register::RDI) == 2 {
                     // first convert the given memory to a string
+                    // unwrap here for now
                     let str = std::str::from_utf8(bytes).unwrap();
                     // simply print this for now
                     println!("{str}");
@@ -1011,8 +1009,13 @@ impl Emu {
                 // we failed
                 self.set_reg(u64::MAX, Register::RAX)
             }
+            // exit
+            231 => {
+                return Err(ExecErr::Exit { ip: unsafe { IP } });
+            }
             x => todo!("syscall # {x}"),
-        }
+        };
+        Ok(())
     }
     /// perform a logical or arithmetic operation, given by `f`,on the given operands
     /// currently it will only support doing an operation on the first 2 ops
@@ -1164,18 +1167,17 @@ impl Emu {
             let val = self.get_reg::<u64, 8>(reg);
             print!("\x1b[1;32m  {:06?}:\x1b[0m {:#x}", reg, val);
         }
-        // for reg in (Register::Xmm0 as u8)..=(Register::Xmm15 as u8) {
-        //     let reg = unsafe { core::mem::transmute::<u8, Register>(reg) };
-        //     let val = self.get_reg::<u64, 8>(reg);
-        //     print!("\x1b[1;32m  {:06?}:\x1b[0m {:#x}", reg, val);
-        // }
         println!()
     }
 }
 
+/// an error was encountered during execution
 #[derive(Debug, Clone, Copy)]
 pub enum ExecErr {
+    /// memory acces error
     AccErr { error: AccessError, ip: u64 },
+    /// exit was called
+    Exit { ip: u64 },
 }
 
 impl From<AccessError> for ExecErr {
