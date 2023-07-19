@@ -15,9 +15,10 @@ use crate::{
 use std::{io::Write, ops::Range};
 
 pub struct Emu {
-    memory: MMU,
+    pub memory: MMU,
     registers: [u64; 18],
     simd_registers: [u128; 16],
+    segment_registers: [u64; 2],
     #[cfg(debug_assertions)]
     pub stack_depth: usize,
     #[cfg(debug_assertions)]
@@ -79,6 +80,7 @@ impl Emu {
             stack_depth: 0,
             #[cfg(debug_assertions)]
             exec_range: Range { start: 0, end: 0 },
+            segment_registers: [0; 2],
         }
     }
 
@@ -149,7 +151,7 @@ impl Emu {
         let operand = instruction.op_kind(index);
         match operand {
             OpKind::Register => {
-                let reg: Register = reg_from_op_reg(instruction.op_register(index)).unwrap();
+                let reg: Register = reg_from_iced_reg(instruction.op_register(index)).unwrap();
                 Ok(self.get_reg(reg))
             }
             OpKind::NearBranch64 => Ok(instruction.near_branch64().try_into().unwrap()),
@@ -172,8 +174,7 @@ impl Emu {
                 Ok(self
                     .memory
                     .read_primitive(Virtaddr(address))
-                    .map(T::from_ne_bytes)
-                    .unwrap())
+                    .map(T::from_ne_bytes)?)
             }
             x => todo!("{x:?}"),
         }
@@ -231,6 +232,13 @@ impl Emu {
             }
             println!("\x1b[0m");
         }
+    }
+
+    pub fn get_seg(&self, reg: SegReg) -> u64 {
+        self.segment_registers[reg as usize]
+    }
+    pub fn set_seg(&mut self, reg: SegReg, val: u64) {
+        self.segment_registers[reg as usize] = val;
     }
 
     pub fn run_emu(&mut self) -> Result<()> {
@@ -986,6 +994,7 @@ impl Emu {
                 } else {
                     todo!()
                 }
+                self.set_reg(0u64, Register::RAX)
             }
             // brk
             12 => {
@@ -1005,8 +1014,36 @@ impl Emu {
             }
             // arch_prctl (ignore this for now and see where it takes us)
             158 => {
-                // we failed
-                self.set_reg(u64::MAX, Register::RAX)
+                match self.get_reg::<u64, 8>(Register::RDI) {
+                    // ARCH_SET_GS
+                    0x1001 => {
+                        todo!("SET_GS")
+                    }
+                    // ARCH_SET_FS
+                    0x1002 => {
+                        self.set_seg(SegReg::Fs, self.get_reg(Register::RSI));
+                        // we were succesful
+                        self.set_reg(0u64, Register::RAX)
+                    }
+                    // ARCH_GET_GS
+                    0x1003 => {
+                        todo!("GET_GS")
+                    }
+                    // ARCH_GET_FS
+                    0x1004 => {
+                        todo!("GET_FS")
+                    }
+                    // ARCH_GET_CPUID
+                    0x1011 => {
+                        todo!("GET_CPUID")
+                    }
+                    // ARCH_SET_CPUID
+                    0x1012 => {
+                        todo!("GET_CPUID")
+                    }
+                    // EINVAL
+                    _ => self.set_reg(u64::MAX, Register::RAX),
+                }
             }
             // exit
             231 => {
@@ -1062,7 +1099,7 @@ impl Emu {
         let opkind = instruction.op_kind(index);
         match opkind {
             OpKind::Register => {
-                let reg: Register = reg_from_op_reg(instruction.op_register(index)).unwrap();
+                let reg: Register = reg_from_iced_reg(instruction.op_register(index)).unwrap();
                 self.set_reg(val, reg);
                 Ok(())
             }
@@ -1091,16 +1128,26 @@ impl Emu {
             // if that is the case, then multiply the value stored in the register (r14 in the above)
             // with its scale (8 in the above case)
             // and add the resulting value to the displacement
-            if let Some(index_reg) = reg_from_op_reg(mem.memory_index()) {
+            if let Some(index_reg) = reg_from_iced_reg(mem.memory_index()) {
                 let scale = mem.memory_index_scale() as usize;
                 addr = addr.wrapping_add(scale * self.get_reg::<usize, 8>(index_reg));
             }
+
+            // check if we are indexin a segment register
+            // if so, add it to the addres
+            // example:
+            // mov    rbx,QWORD PTR fs:0x10
+            // here fs is the segment register
+            if let Some(seg_reg) = seg_from_iced_seg(mem.memory_segment()) {
+                addr = addr.wrapping_add(self.get_seg(seg_reg) as usize);
+            }
+
             // check if there is a base register indexing the memory
             // if that is the case, add the value stored in the register to the current address
             // example:
             // call   QWORD PTR [r12+r14*8]
             // here r12 is the base register
-            if let Some(base_reg) = reg_from_op_reg(mem.memory_base()) {
+            if let Some(base_reg) = reg_from_iced_reg(mem.memory_base()) {
                 // this can be wrapping, for example you can have
                 // cmp    QWORD PTR [rdi-0x8],0x0
                 // substracting some displacement (i.e. doing a wrapping add (I could be wrong here))
@@ -1166,7 +1213,8 @@ impl Emu {
             let val = self.get_reg::<u64, 8>(reg);
             print!("\x1b[1;32m  {:06?}:\x1b[0m {:#x}", reg, val);
         }
-        println!()
+        println!();
+        println!("segment regs: {:#x?}", self.segment_registers);
     }
 }
 
@@ -1186,6 +1234,11 @@ impl From<AccessError> for ExecErr {
             ip: unsafe { IP },
         }
     }
+}
+
+pub enum SegReg {
+    Fs,
+    Gs,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1298,7 +1351,7 @@ pub enum Bitness {
     HundredTwentyEigth = 128,
 }
 #[inline]
-fn reg_from_op_reg(reg: iced_x86::Register) -> Option<Register> {
+fn reg_from_iced_reg(reg: iced_x86::Register) -> Option<Register> {
     use self::Register::*;
     use iced_x86::Register;
     match reg {
@@ -1346,6 +1399,13 @@ fn reg_from_op_reg(reg: iced_x86::Register) -> Option<Register> {
         Register::XMM0 => Some(Xmm0),
         Register::XMM1 => Some(Xmm1),
         x => todo!("implement register {x:?}"),
+    }
+}
+
+fn seg_from_iced_seg(reg: iced_x86::Register) -> Option<SegReg> {
+    match reg {
+        iced_x86::Register::FS => Some(SegReg::Fs),
+        _ => None,
     }
 }
 

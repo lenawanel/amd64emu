@@ -122,7 +122,7 @@ impl MMU {
         {
             println!("expected permission: {:#b}", exp_perm.0);
             println!("perm check failed");
-            return Err(AccessError::PermErr);
+            return Err(AccessError::PermErr(addr, self.permissions[addr.0]));
         }
         // dbg!("after checking permissions");
 
@@ -159,7 +159,7 @@ impl MMU {
             .iter()
             .all(|&x| (x & PERM_READ).0 != 0)
         {
-            return Err(AccessError::PermErr);
+            return Err(AccessError::PermErr(addr, self.permissions[addr.0]));
         }
 
         // actually copy the memory
@@ -179,7 +179,7 @@ impl MMU {
             .iter()
             .all(|&x| x & exp_perms == exp_perms)
         {
-            return Err(AccessError::PermErr);
+            return Err(AccessError::PermErr(addr, self.permissions[addr.0]));
         }
 
         // actually copy the memory
@@ -200,7 +200,7 @@ impl MMU {
             .iter()
             .all(|perm| (*perm & PERM_WRITE).0 != 0)
         {
-            return Err(AccessError::PermErr);
+            return Err(AccessError::PermErr(addr, self.permissions[addr.0]));
         }
 
         // acutally write the requested memory
@@ -265,7 +265,7 @@ impl MMU {
             .iter()
             .all(|perm| (*perm & PERM_READ).0 != 0)
         {
-            return Err(AccessError::PermErr);
+            return Err(AccessError::PermErr(addr, self.permissions[addr.0]));
         }
 
         // copy the requested memory
@@ -281,7 +281,7 @@ impl MMU {
             .iter()
             .all(|perm| (*perm & exp_perms).0 != 0)
         {
-            return Err(AccessError::PermErr);
+            return Err(AccessError::PermErr(addr, self.permissions[addr.0]));
         }
 
         Ok(&self.memory[addr.0..addr.0 + size])
@@ -410,7 +410,7 @@ impl MMU {
             return Err(AccessError::AddrOverflow);
         };
         let Some(region) = self.permissions.get_mut(addr.0..end_addr) else {
-            return Err(AccessError::PermErr);
+            return Err(AccessError::PermErr(addr, self.permissions[addr.0]));
         };
         region.iter_mut().for_each(|x| *x = perms);
 
@@ -447,7 +447,7 @@ pub enum AccessError {
     AddrOOB,
     /// We tried to acces memory without the
     /// needed permissions
-    PermErr,
+    PermErr(Virtaddr, Perm),
 }
 
 #[repr(transparent)]

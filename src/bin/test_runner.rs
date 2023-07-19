@@ -10,4 +10,5 @@ pub fn main() {
         emu.print_stack::<u64, 8>(emu.stack_depth);
     }
     println!("exec result: {res:#x?}");
+    println!("cur_alc: {:#x?}", emu.memory.cur_alc);
 }
