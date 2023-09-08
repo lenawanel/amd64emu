@@ -102,7 +102,7 @@ impl MMU {
 
     /// write a buffer to a virtual adress, checking if we have the given permissions
     pub fn write_from_perms(&mut self, addr: Virtaddr, buf: &[u8], exp_perm: Perm) -> Result<()> {
-        #[cfg(raw_tracking)]
+        #[cfg(feature = "raw_tracking")]
         let mut has_raw = false;
 
         // check if we're not writing past the memory buffer
@@ -114,7 +114,7 @@ impl MMU {
         // dbg!("checking permissions");
         // check if we have the permission, paying extra attention to if we have RAW
         // memory, to update the permissions later
-        #[cfg(raw_tracking)]
+        #[cfg(feature = "raw_tracking")]
         if !self.permissions[addr.0..addr.0 + buf.len()]
             .iter()
             .all(|&x| {
@@ -122,17 +122,13 @@ impl MMU {
                 (x & exp_perm).0 != 0
             })
         {
-            println!("expected permission: {:#b}", exp_perm.0);
-            println!("perm check failed");
             return Err(AccessError::PermErr(addr, self.permissions[addr.0]));
         }
-        #[cfg(not(raw_tracking))]
+        #[cfg(not(feature = "raw_tracking"))]
         if !self.permissions[addr.0..addr.0 + buf.len()]
             .iter()
             .all(|&x| (x & exp_perm).0 != 0)
         {
-            println!("expected permission: {:#b}", exp_perm.0);
-            println!("perm check failed");
             return Err(AccessError::PermErr(addr, self.permissions[addr.0]));
         }
         // dbg!("after checking permissions");
@@ -141,7 +137,7 @@ impl MMU {
         // dbg!("after writing memory");
 
         // if the read after write flag is up, update the Permission of the memory
-        #[cfg(raw_tracking)]
+        #[cfg(feature = "raw_tracking")]
         if has_raw {
             self.permissions.iter_mut().for_each(|x| {
                 if (*x & PERM_RAW).0 != 0 {
@@ -252,14 +248,14 @@ impl MMU {
         }
 
         // Mark the memory as un-initialized and writable
-        #[cfg(raw_tracking)]
+        #[cfg(feature = "raw_tracking")]
         if self
             .set_permissions(base, align_size, PERM_RAW | PERM_WRITE)
             .is_err()
         {
             return None;
         }
-        #[cfg(not(raw_tracking))]
+        #[cfg(not(feature = "raw_tracking"))]
         if self
             .set_permissions(base, align_size, PERM_WRITE | PERM_READ)
             .is_err()
@@ -480,7 +476,7 @@ pub const PERM_READ: Perm = Perm(1 << 2);
 pub const PERM_WRITE: Perm = Perm(1 << 1);
 /// permission to read a byte in memory after writing to it
 /// this can be useful for detecting unintialized reads
-#[cfg(raw_tracking)]
+#[cfg(feature = "raw_tracking")]
 pub const PERM_RAW: Perm = Perm(1 << 3);
 /// permission to execute a byte in memory
 pub const PERM_EXEC: Perm = Perm(1 << 0);
