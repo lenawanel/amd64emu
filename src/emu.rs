@@ -330,13 +330,13 @@ impl Emu {
             }
 
             macro_rules! jmp {
-                () => {
+                () => {{
                     // get the new ip
                     let new_ip: u64 = self.get_val::<u64, 8>(instruction, 0)?;
                     self.set_reg(new_ip, Register::RIP);
                     // and jump to it
                     continue 'next_instr;
-                };
+                }};
             }
 
             macro_rules! sized_mov {
@@ -344,6 +344,72 @@ impl Emu {
                     let val: $typ = self.get_val(instruction, 1)?;
                     self.set_val(instruction, 0, val)?;
                 }};
+            }
+
+            macro_rules! cc {
+                (be,$code:expr) => {
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0
+                        || self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) != 0
+                    {
+                        $code;
+                    }
+                };
+                (ne,$code:expr) => {
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0 {
+                        $code;
+                    }
+                };
+                (e,$code:expr) => {
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0 {
+                        $code;
+                    }
+                };
+                (b,$code:expr) => {
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) != 0 {
+                        $code;
+                    }
+                };
+                (le,$code:expr) => {
+                    // if the ZF==1
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0
+                        // or SF!=OF
+                        || (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 11)).count_ones()
+                            != (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 7)).count_ones()
+                    {
+                        $code;
+                    }
+                };
+                (g,$code:expr) => {
+                    // if ZF==0
+                    if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 6) == 0
+                        // and SF==OF
+                        && (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 11)).count_ones()
+                            == (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 7)).count_ones()
+                    {
+                        $code;
+                    }
+                };
+                (a,$code:expr) => {
+                    // if ZF==0
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0
+                        // and CF==0
+                        && self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) == 0
+                    {
+                        $code;
+                    }
+                };
+                (ae,$code:expr) => {
+                    // if CF==0
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) == 0 {
+                        $code;
+                    }
+                };
+                (s,$code:expr) => {
+                    // if CF==0
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 7) != 0 {
+                        $code;
+                    }
+                }
             }
 
             // set the instruction pointer to the next instruction
@@ -627,66 +693,48 @@ impl Emu {
 
                 // | jump instructions |
                 Mnemonic::Jne => {
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0 {
-                        jmp!();
+                    cc! {ne,
+                        jmp!()
                     }
                 }
                 Mnemonic::Jbe => {
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0
-                        || self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) != 0
-                    {
-                        jmp!();
+                    cc! {be,
+                        jmp!()
                     }
                 }
                 Mnemonic::Je => {
-                    if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 6) != 0 {
-                        jmp!();
+                    cc! {e,
+                        jmp!()
                     }
                 }
                 Mnemonic::Jb => {
-                    if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 0) != 0 {
-                        jmp!();
+                    cc! { b,
+                        jmp!()
                     }
                 }
                 Mnemonic::Jle => {
-                    // if the ZF==1
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0
-                        // or SF!=OF
-                        || (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 11)).count_ones()
-                            != (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 7)).count_ones()
-                    {
-                        jmp!();
+                    cc! { le,
+                        jmp!()
                     }
                 }
                 Mnemonic::Jg => {
-                    // if ZF==0
-                    if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 6) == 0
-                        // and SF==OF
-                        && (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 11)).count_ones()
-                            == (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 7)).count_ones()
-                    {
-                        jmp!();
+                    cc! {g,
+                        jmp!()
                     }
                 }
                 Mnemonic::Ja => {
-                    // if ZF==0
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0
-                        // and CF==0
-                        && self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) == 0
-                    {
-                        jmp!();
+                    cc! {a,
+                        jmp!()
                     }
                 }
                 Mnemonic::Jae => {
-                    // if CF==0
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) == 0 {
-                        jmp!();
+                    cc! { ae,
+                        jmp!()
                     }
                 }
                 Mnemonic::Js => {
-                    // if CF==0
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 7) != 0 {
-                        jmp!();
+                    cc! { s,
+                        jmp!()
                     }
                 }
                 Mnemonic::Jmp => {
@@ -743,41 +791,34 @@ impl Emu {
                         +----------------------+
                 */
                 Mnemonic::Cmovne => {
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0 {
+                    cc! {ne, {
                         match_bitness_typ!(sized_mov)
-                    }
+                    }}
                 }
                 Mnemonic::Cmove => {
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0 {
+                    cc! {e, {
                         match_bitness_typ!(sized_mov)
-                    }
+                    }}
                 }
                 Mnemonic::Cmova => {
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0
-                        // and CF==0
-                        && self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) == 0
-                    {
+                    cc! {a,
                         match_bitness_typ!(sized_mov)
                     }
                 }
                 Mnemonic::Cmovae => {
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) == 0 {
+                    cc! {ae,
                         match_bitness_typ!(sized_mov)
                     }
                 }
                 Mnemonic::Cmovg => {
-                    if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 6) == 0
-                        // and SF==OF
-                        && (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 11)).count_ones()
-                            == (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 7)).count_ones()
-                    {
+                    cc! {g,
                         match_bitness_typ!(sized_mov)
                     }
                 }
                 Mnemonic::Cmovb => {
-                    if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 0) != 0 {
+                    cc! {b, {
                         match_bitness_typ!(sized_mov)
-                    }
+                    }}
                 }
                 Mnemonic::Mov => {
                     // mov, as documented by https://www.felixcloutier.com/x86/mov
@@ -1045,9 +1086,22 @@ impl Emu {
                     _ => self.set_reg(u64::MAX, Register::RAX),
                 }
             }
+            218 => {
+                // do nothing for now
+                self.set_reg(0u64, Register::RAX)
+            }
+            273 => {
+                // do nothing for now
+                self.set_reg(0u64, Register::RAX)
+            }
             // exit
             231 => {
                 return Err(ExecErr::Exit { ip: unsafe { IP } });
+            }
+            // rseq
+            334 => {
+                // do nothing for now
+                self.set_reg(0u64, Register::RAX)
             }
             x => todo!("syscall # {x}"),
         };
