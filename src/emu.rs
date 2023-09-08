@@ -171,10 +171,7 @@ impl Emu {
             }
             OpKind::Memory => {
                 let address: usize = self.calc_addr(instruction);
-                Ok(self
-                    .memory
-                    .read_primitive(Virtaddr(address))
-                    .map(T::from_ne_bytes)?)
+                Ok(self.memory.read_primitive(Virtaddr(address))?)
             }
             x => todo!("{x:?}"),
         }
@@ -196,9 +193,9 @@ impl Emu {
             let mut depth = 0;
             'recursive_memory_lookup: while let Ok(new_val) = self
                 .memory
-                .read_primitive::<BYTES>(Virtaddr(usize::try_from(val).unwrap()))
+                .read_primitive(Virtaddr(usize::try_from(val).unwrap()))
             {
-                val = T::from_ne_bytes(new_val);
+                val = new_val;
                 let val_addr = usize::try_from(val).unwrap();
                 print!("\x1b[0m -> ");
 
@@ -268,7 +265,7 @@ impl Emu {
             self.memory.read_to(
                 // we currently only support running this on x86 hosts
                 // so it is fine to assume that a usize has size 8 bytes here
-                Virtaddr(self.get_reg::<usize, 8>(Register::RIP)),
+                Virtaddr(self.get_reg(Register::RIP)),
                 &mut inst_buf,
             )?;
             unsafe { IP = self.get_reg(Register::RIP) };
@@ -293,7 +290,7 @@ impl Emu {
             }
             macro_rules! push {
                 ($expr:expr) => {
-                    let sp = self.get_reg::<u64, 8>(Register::RSP) as usize
+                    let sp = self.get_reg::<usize, 8>(Register::RSP)
                         - core::mem::size_of_val(&$expr) as usize;
                     self.memory.write_primitive(Virtaddr(sp), $expr)?;
                     self.set_reg(sp, Register::RSP);
@@ -301,7 +298,7 @@ impl Emu {
             }
             macro_rules! pop {
                 ($exp:expr) => {{
-                    let sp = self.get_reg::<u64, 8>(Register::RSP) as usize;
+                    let sp: usize = self.get_reg::<usize, 8>(Register::RSP);
                     self.set_reg(sp + $exp as usize, Register::RSP);
                     self.memory.read_primitive(Virtaddr(sp))?
                 }};
@@ -433,7 +430,7 @@ impl Emu {
                             })?
                         };
                     }
-                    self.set_reg::<u8, 1>(
+                    self.set_reg(
                         overflowing as u8 | self.get_reg::<u8, 1>(Register::RFLAGS),
                         Register::RFLAGS,
                     );
@@ -453,7 +450,7 @@ impl Emu {
                         };
                     }
 
-                    self.set_reg::<u8, 1>(
+                    self.set_reg(
                         overflowing as u8 | self.get_reg::<u8, 1>(Register::RFLAGS),
                         Register::RFLAGS,
                     );
@@ -601,28 +598,28 @@ impl Emu {
                 }
                 Mnemonic::Not => {
                     macro_rules! sized_not {
-                        ($typ:ty,$size:literal) => {{
+                        ($typ:ty) => {{
                             let val: $typ = self.get_val(instruction, 0)?;
-                            self.set_val::<$typ, $size>(instruction, 0, !val)?;
+                            self.set_val(instruction, 0, !val)?;
                         }};
                     }
 
-                    match_bitness_ts!(sized_not)
+                    match_bitness_typ!(sized_not)
                 }
                 Mnemonic::Neg => {
                     macro_rules! sized_neg {
-                        ($typ:ty,$size:literal) => {{
+                        ($typ:ty) => {{
                             let val: $typ = self.get_val(instruction, 0)?;
-                            self.set_val::<$typ, $size>(instruction, 0, -val)?;
+                            self.set_val(instruction, 0, -val)?;
                         }};
                     }
 
                     match bitness(instruction) {
-                        Bitness::Eight => sized_neg!(i8, 1),
-                        Bitness::Sixteen => sized_neg!(i16, 2),
-                        Bitness::ThirtyTwo => sized_neg!(i32, 4),
-                        Bitness::SixtyFour => sized_neg!(i64, 8),
-                        Bitness::HundredTwentyEigth => sized_neg!(i128, 16),
+                        Bitness::Eight => sized_neg!(i8),
+                        Bitness::Sixteen => sized_neg!(i16),
+                        Bitness::ThirtyTwo => sized_neg!(i32),
+                        Bitness::SixtyFour => sized_neg!(i64),
+                        Bitness::HundredTwentyEigth => sized_neg!(i128),
                     }
                 }
                 Mnemonic::Or => {
@@ -675,7 +672,7 @@ impl Emu {
                 }
                 Mnemonic::Ret => {
                     // get the new ip
-                    let new_ip: u64 = u64::from_ne_bytes(pop!(8));
+                    let new_ip: u64 = pop!(8);
                     #[cfg(debug_assertions)]
                     {
                         // println!("{:\t<1$}ret to: {new_ip:#x}", "", call_depth);
@@ -791,14 +788,14 @@ impl Emu {
                         +----------------------+
                 */
                 Mnemonic::Cmovne => {
-                    cc! {ne, {
+                    cc! {ne,
                         match_bitness_typ!(sized_mov)
-                    }}
+                    }
                 }
                 Mnemonic::Cmove => {
-                    cc! {e, {
+                    cc! {e,
                         match_bitness_typ!(sized_mov)
-                    }}
+                    }
                 }
                 Mnemonic::Cmova => {
                     cc! {a,
@@ -816,9 +813,9 @@ impl Emu {
                     }
                 }
                 Mnemonic::Cmovb => {
-                    cc! {b, {
+                    cc! {b,
                         match_bitness_typ!(sized_mov)
-                    }}
+                    }
                 }
                 Mnemonic::Mov => {
                     // mov, as documented by https://www.felixcloutier.com/x86/mov
@@ -852,7 +849,7 @@ impl Emu {
                 Mnemonic::Pop => {
                     macro_rules! pop_sized {
                         ($typ:ty, $size:literal) => {{
-                            let val = <$typ>::from_ne_bytes(pop!($size));
+                            let val: $typ = pop!($size);
                             self.set_val(instruction, 0, val)?;
                         }};
                     }
@@ -1178,7 +1175,9 @@ impl Emu {
             // get the displacement first, since any memory acces will have one (even if it's 0)
             let mut addr = mem.memory_displacement64() as usize;
             // check if there is a memory indexing register like in
+            // ```x86asm
             // call   QWORD PTR [r12+r14*8]
+            // ```
             // if that is the case, then multiply the value stored in the register (r14 in the above)
             // with its scale (8 in the above case)
             // and add the resulting value to the displacement
@@ -1190,7 +1189,9 @@ impl Emu {
             // check if we are indexin a segment register
             // if so, add it to the addres
             // example:
+            // ```x86asm
             // mov    rbx,QWORD PTR fs:0x10
+            // ```
             // here fs is the segment register
             if let Some(seg_reg) = seg_from_iced_seg(mem.memory_segment()) {
                 addr = addr.wrapping_add(self.get_seg(seg_reg) as usize);
@@ -1199,11 +1200,15 @@ impl Emu {
             // check if there is a base register indexing the memory
             // if that is the case, add the value stored in the register to the current address
             // example:
+            // ```x86asm
             // call   QWORD PTR [r12+r14*8]
+            // ```
             // here r12 is the base register
             if let Some(base_reg) = reg_from_iced_reg(mem.memory_base()) {
                 // this can be wrapping, for example you can have
+                // ```x86asm
                 // cmp    QWORD PTR [rdi-0x8],0x0
+                // ```
                 // substracting some displacement (i.e. doing a wrapping add (I could be wrong here))
                 addr = addr.wrapping_add(self.get_reg::<usize, 8>(base_reg));
             }
@@ -1251,9 +1256,9 @@ impl Emu {
             let mut depth = 0;
             while let Ok(new_val) = self
                 .memory
-                .read_primitive::<8>(Virtaddr(usize::try_from(val).unwrap()))
+                .read_primitive(Virtaddr(usize::try_from(val).unwrap()))
             {
-                val = u64::from_ne_bytes(new_val);
+                val = new_val;
                 print!("\x1b[0m -> \x1b[;96m{val:#x?}");
                 depth += 1;
                 if depth > 5 {

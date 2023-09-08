@@ -20,6 +20,8 @@ pub trait Primitive<const SIZE: usize>:
     fn to_u64(self) -> u64;
 
     fn from_ne_bytes(bytes: [u8; SIZE]) -> Self;
+
+    fn to_ne_bytes(self) -> [u8; SIZE];
 }
 
 macro_rules! impl_primitive {
@@ -29,11 +31,19 @@ macro_rules! impl_primitive {
             fn to_u64(self) -> u64 {
                 self as u64
             }
+
             #[inline(always)]
             fn from_ne_bytes(bytes: [u8; $bytes]) -> Self {
                 // assert!(size == $bytes);
                 // let bytes = unsafe { core::mem::transmute::<[u8; size], [u8; $bytes]>(bytes) };
                 Self::from_ne_bytes(bytes)
+            }
+
+            #[inline(always)]
+            fn to_ne_bytes(self) -> [u8; $bytes] {
+                // assert!(size == $bytes);
+                // let bytes = unsafe { core::mem::transmute::<[u8; size], [u8; $bytes]>(bytes) };
+                <$type>::to_ne_bytes(self)
             }
         }
     };

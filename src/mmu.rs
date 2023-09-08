@@ -6,7 +6,7 @@ use std::path::Path;
 
 use elf::{endian::AnyEndian, ElfBytes};
 
-use crate::symbol_table::SymbolTable;
+use crate::{primitive::Primitive, symbol_table::SymbolTable};
 
 pub struct MMU {
     memory: Vec<u8>,
@@ -197,7 +197,11 @@ impl MMU {
     }
 
     /// write a primitive type to memory
-    pub fn write_primitive<T: Copy>(&mut self, addr: Virtaddr, value: T) -> Result<()> {
+    pub fn write_primitive<T: Primitive<BYTES>, const BYTES: usize>(
+        &mut self,
+        addr: Virtaddr,
+        value: T,
+    ) -> Result<()> {
         // check if we are not writing past the memory buffer
         if addr.0 + std::mem::size_of::<T>() > self.memory.len() {
             return Err(AccessError::AddrOOB);
@@ -215,9 +219,8 @@ impl MMU {
         // the pointer casting here is needed,
         // since rust places an restriction of using `std::mem::sizeof::<T>()`
         // in the construction of arrays
-        self.memory[addr.0..addr.0 + std::mem::size_of::<T>()].copy_from_slice(unsafe {
-            core::slice::from_raw_parts(&value as *const T as *const u8, core::mem::size_of::<T>())
-        });
+        self.memory[addr.0..addr.0 + std::mem::size_of::<T>()]
+            .copy_from_slice(&value.to_ne_bytes());
         // self.memory[addr.0..addr.0 + std::mem::size_of::<T>()]
         //     .copy_from_slice(&value.to_ne_bytes());
 
@@ -267,7 +270,7 @@ impl MMU {
     }
     /// this function reads primitives as [u8; N],
     /// this is to circumvent the restriction of using generic const expressions
-    pub fn read_primitive<const N: usize>(&self, addr: Virtaddr) -> Result<[u8; N]> {
+    pub fn read_primitive<const N: usize, T: Primitive<N>>(&self, addr: Virtaddr) -> Result<T> {
         // check if we are not writing past the memory buffer
         let Some(last_addr) = addr.0.checked_add(N) else {
             return Err(AccessError::AddrOverflow);
@@ -287,7 +290,7 @@ impl MMU {
         // copy the requested memory
         let mut buf = [0u8; N];
         buf.copy_from_slice(&self.memory[addr.0..last_addr]);
-        Ok(buf)
+        Ok(T::from_ne_bytes(buf))
     }
 
     /// get acces to a mutable slice of memory
