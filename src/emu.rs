@@ -1073,6 +1073,11 @@ impl Emu {
                     }
                 }
             }
+            // access
+            21 => {
+                // pretend you can
+                self.set_reg(0, Register::RAX)
+            }
             // arch_prctl (ignore this for now and see where it takes us)
             158 => {
                 match self.get_reg::<u64, 8>(Register::RDI) {
