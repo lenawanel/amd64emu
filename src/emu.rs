@@ -77,14 +77,14 @@ impl Emu {
         let progname = self
             .memory
             .allocate_write(b"/bin/test\0")
-            .expect("Failed to write program name");
+            .expect("Failed to write program name").0;
         let auxv = self.prepare_auxv(progname);
 
         // Set up the program name
         let argv = self
             .memory
             .allocate_write(b"/bin/test\0")
-            .expect("Failed to write program name");
+            .expect("Failed to write program name").0;
 
         // Set up the initial program stack state
         self.push(auxv.0 as u64); // Auxp
@@ -1067,7 +1067,7 @@ impl Emu {
                 let rdi: u64 = self.get_reg(Register::RDI);
                 if rdi == 0 {
                     let rsi = self.get_reg::<u64, 8>(Register::RSI);
-                    if let Some(Virtaddr(addr)) = self.memory.allocate(rsi as usize) {
+                    if let Some((Virtaddr(addr), _)) = self.memory.allocate(rsi as usize) {
                         self.set_reg(addr, Register::RAX)
                     }
                     // allocating memory failed
@@ -1086,7 +1086,7 @@ impl Emu {
                 } else {
                     // ignore deallocations for now
                     if let Some(addr) = self.memory.allocate(rdi as usize - self.memory.cur_alc.0) {
-                        self.set_reg(addr.0 + self.memory.cur_alc.0, Register::RAX)
+                        self.set_reg(addr.1.0 + self.memory.cur_alc.0, Register::RAX)
                     }
                     // allocating memory failed
                     else {

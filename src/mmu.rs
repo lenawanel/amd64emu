@@ -236,7 +236,8 @@ impl MMU {
     }
 
     /// Allocate a region of memory as RW in the address space
-    pub fn allocate(&mut self, size: usize) -> Option<Virtaddr> {
+    /// returns (base, cur_alc)
+    pub fn allocate(&mut self, size: usize) -> Option<(Virtaddr, Virtaddr)> {
         // 32-byte align the allocation
         // this is required for SSE memcpy
         let align_size = (size + 0x1f) & !0x1f;
@@ -268,10 +269,12 @@ impl MMU {
             return None;
         }
 
-        Some(base)
+        Some((base, self.cur_alc))
     }
 
-    pub fn allocate_write(&mut self, buf: &[u8]) -> Option<Virtaddr> {
+    /// Allocate a region the size of buf in memery as RW, writing buf to it
+    /// returns (base, cur_alc)
+    pub fn allocate_write(&mut self, buf: &[u8]) -> Option<(Virtaddr, Virtaddr)> {
         // 32-byte align the allocation
         // this is required for SSE memcpy
         let align_size = (buf.len() + 0x1f) & !0x1f;
@@ -295,8 +298,8 @@ impl MMU {
         }
 
         self.write_from(base, buf).unwrap();
-
-        Some(base)
+        
+        Some((base, self.cur_alc))
     }
     /// this function reads primitives as [u8; N],
     /// this is to circumvent the restriction of using generic const expressions
