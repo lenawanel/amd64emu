@@ -78,7 +78,7 @@ impl Emu {
             .memory
             .allocate_write(b"/bin/test\0")
             .expect("Failed to write program name");
-        self.prepare_auxv(progname);
+        let auxv = self.prepare_auxv(progname);
 
         // Set up the program name
         let argv = self
@@ -87,10 +87,10 @@ impl Emu {
             .expect("Failed to write program name");
 
         // Set up the initial program stack state
-        self.push(0u64); // Auxp
+        self.push(auxv.0 as u64); // Auxp
         self.push(0u64); // Envp
         self.push(0u64); // Argv end
-        self.push(argv.0); // Argv
+        self.push(argv.0); // Argv [0]
         self.push(1u64); // Argc
     }
 
