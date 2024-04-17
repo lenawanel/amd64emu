@@ -1057,6 +1057,16 @@ impl Emu {
                 }
                 self.set_reg(0u64, Register::RAX)
             }
+            // mmap
+            9 => {
+                let rdi: u64 = self.get_reg(Register::RDI);
+                if rdi == 0 {
+                    let rsi = self.get_reg::<u64, 8>(Register::RSI);
+                    self.memory.allocate(rsi as usize);
+                } else {
+                    todo!()
+                }
+            }
             // brk
             12 => {
                 let rdi: u64 = self.get_reg(Register::RDI);
