@@ -1068,7 +1068,7 @@ impl Emu {
                 if rdi == 0 {
                     let rsi = self.get_reg::<u64, 8>(Register::RSI);
                     if let Some(Virtaddr(addr)) = self.memory.allocate(rsi as usize) {
-                        self.set_reg(0, Register::RAX)
+                        self.set_reg(addr, Register::RAX)
                     }
                     // allocating memory failed
                     else {
@@ -1086,7 +1086,7 @@ impl Emu {
                 } else {
                     // ignore deallocations for now
                     if let Some(addr) = self.memory.allocate(rdi as usize - self.memory.cur_alc.0) {
-                        self.set_reg(addr.0, Register::RAX)
+                        self.set_reg(addr.0 + self.memory.cur_alc.0, Register::RAX)
                     }
                     // allocating memory failed
                     else {
@@ -1134,7 +1134,7 @@ impl Emu {
             }
             218 => {
                 // do nothing for now
-                self.set_reg(0u64, Register::RAX)
+                self.set_reg(1u64, Register::RAX)
             }
             273 => {
                 // do nothing for now
