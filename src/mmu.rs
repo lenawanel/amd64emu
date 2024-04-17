@@ -96,11 +96,13 @@ impl MMU {
     }
 
     /// write a buffer to a virtual adress
+    #[must_use]
     pub fn write_from(&mut self, addr: Virtaddr, buf: &[u8]) -> Result<()> {
         self.write_from_perms(addr, buf, PERM_WRITE)
     }
 
     /// write a buffer to a virtual adress, checking if we have the given permissions
+    #[must_use]
     pub fn write_from_perms(&mut self, addr: Virtaddr, buf: &[u8], exp_perm: Perm) -> Result<()> {
         #[cfg(feature = "raw_tracking")]
         let mut has_raw = false;
@@ -266,7 +268,35 @@ impl MMU {
             return None;
         }
 
-        Some(self.cur_alc)
+        Some(base)
+    }
+
+    pub fn allocate_write(&mut self, buf: &[u8]) -> Option<Virtaddr> {
+        // 32-byte align the allocation
+        // this is required for SSE memcpy
+        let align_size = (buf.len() + 0x1f) & !0x1f;
+
+        // Get the current allocation base
+        let base = self.cur_alc;
+
+        // Update the allocation address
+        self.cur_alc = Virtaddr(self.cur_alc.0.checked_add(align_size)?);
+
+        // Could not satisfy allocation without going OOM
+        if self.cur_alc.0 > self.memory.len() {
+            return None;
+        }
+
+        if self
+            .set_permissions(base, align_size, PERM_WRITE | PERM_READ)
+            .is_err()
+        {
+            return None;
+        }
+
+        self.write_from(base, buf).unwrap();
+
+        Some(base)
     }
     /// this function reads primitives as [u8; N],
     /// this is to circumvent the restriction of using generic const expressions

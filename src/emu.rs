@@ -32,6 +32,36 @@ static mut IP: u64 = 0;
 type Result<T> = std::result::Result<T, ExecErr>;
 
 impl Emu {
+    // for reference https://github.com/jart/blink/blob/master/blink/argv.c
+    fn prepare_auxv(&mut self, progname: Virtaddr) -> Virtaddr {
+        fn push_auxv(emu: &mut Emu, k: u64, v: u64) -> Virtaddr {
+            emu.push(k);
+            emu.push(v)
+        }
+
+        let rand = push_auxv(self, 0xdeadbeefdeadbeef, 0xdeadbeefdeadbeef);
+
+        push_auxv(self, 0, 0);
+        push_auxv(self, 11, 1000);
+        push_auxv(self, 12, 1000);
+        push_auxv(self, 13, 1000);
+        push_auxv(self, 14, 1000);
+        push_auxv(self, 23, 0);
+        push_auxv(self, 6, 4096);
+        push_auxv(self, 17, 100);
+        push_auxv(self, 25, rand.0 as u64);
+        push_auxv(self, 31, progname.0 as u64)
+    }
+
+    fn push<const SIZE: usize>(&mut self, n: impl Primitive<SIZE>) -> Virtaddr {
+        let sp = self.get_reg::<u64, 8>(Register::RSP) as usize - SIZE;
+        self.memory
+            .write_primitive(Virtaddr(sp), n)
+            .expect("Push failed");
+        self.set_reg(sp, Register::RSP);
+        return Virtaddr(sp);
+    }
+
     pub fn load<P: AsRef<Path>>(&mut self, file: P) {
         let (rip, frame, exec_range) = self.memory.load(file);
         self.set_reg(rip.0 as u64, Register::RIP);
@@ -44,31 +74,24 @@ impl Emu {
         }
 
         // Set up the program name
+        let progname = self
+            .memory
+            .allocate_write(b"/bin/test\0")
+            .expect("Failed to write program name");
+        self.prepare_auxv(progname);
+
+        // Set up the program name
         let argv = self
             .memory
-            .allocate(8)
-            .expect("Failed to allocate program name");
-        self.memory
-            .write_from(Virtaddr(argv.0 - 8), b"test\0")
+            .allocate_write(b"/bin/test\0")
             .expect("Failed to write program name");
 
-        macro_rules! push {
-            ($expr:expr) => {
-                let sp = self.get_reg::<u64, 8>(Register::RSP) as usize
-                    - core::mem::size_of_val(&$expr) as usize;
-                self.memory
-                    .write_primitive(Virtaddr(sp), $expr)
-                    .expect("Push failed");
-                self.set_reg(sp, Register::RSP);
-            };
-        }
-
         // Set up the initial program stack state
-        push!(0u64); // Auxp
-        push!(0u64); // Envp
-        push!(0u64); // Argv end
-        push!(argv.0); // Argv
-        push!(1u64); // Argc
+        self.push(0u64); // Auxp
+        self.push(0u64); // Envp
+        self.push(0u64); // Argv end
+        self.push(argv.0); // Argv
+        self.push(1u64); // Argc
     }
 
     pub fn new(size: usize) -> Self {
