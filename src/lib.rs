@@ -1,5 +1,7 @@
 #![feature(portable_simd)]
 #![feature(thread_local)]
+#![feature(unchecked_math)]
+#![feature(unchecked_shifts)]
 pub mod emu;
 pub mod mmu;
 pub mod primitive;

@@ -23,6 +23,7 @@ pub struct Emu {
     pub stack_depth: usize,
     #[cfg(debug_assertions)]
     exec_range: Range<usize>,
+    rng: usize,
 }
 
 // TODO: avoid this
@@ -32,14 +33,30 @@ static mut IP: u64 = 0;
 type Result<T> = std::result::Result<T, ExecErr>;
 
 impl Emu {
+    #[inline(always)]
+    fn rng<const BYTES: usize, T: Primitive<BYTES>>(&mut self) -> T
+    where
+        <T as TryFrom<usize>>::Error: Debug,
+    {
+        self.rng = unsafe { self.rng.unchecked_add(1) };
+        self.rng.try_into().unwrap()
+    }
+
     // for reference https://github.com/jart/blink/blob/master/blink/argv.c
     fn prepare_auxv(&mut self, progname: Virtaddr) -> Virtaddr {
         fn push_auxv(emu: &mut Emu, k: u64, v: u64) -> Virtaddr {
-            emu.push(k);
-            emu.push(v)
+            emu.push(v);
+            emu.push(k)
         }
 
-        let rand = push_auxv(self, 0xdeadbeefdeadbeef, 0xdeadbeefdeadbeef);
+        let rand = self
+            .memory
+            .allocate_write(&[
+                0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef, 0xde, 0xad,
+                0xbe, 0xef,
+            ])
+            .unwrap()
+            .0;
 
         push_auxv(self, 0, 0);
         push_auxv(self, 11, 1000);
@@ -77,18 +94,22 @@ impl Emu {
         let progname = self
             .memory
             .allocate_write(b"/bin/test\0")
-            .expect("Failed to write program name").0;
+            .expect("Failed to write program name")
+            .0;
         let auxv = self.prepare_auxv(progname);
 
         // Set up the program name
         let argv = self
             .memory
             .allocate_write(b"/bin/test\0")
-            .expect("Failed to write program name").0;
+            .expect("Failed to write program name")
+            .0;
+
+        self.set_reg(argv.0, Register::RDX);
 
         // Set up the initial program stack state
-        self.push(auxv.0 as u64); // Auxp
-        self.push(0u64); // Envp
+        // self.push(auxv.0 as u64); // Auxp
+        self.push(0u64); // Envp end
         self.push(0u64); // Argv end
         self.push(argv.0); // Argv [0]
         self.push(1u64); // Argc
@@ -104,6 +125,7 @@ impl Emu {
             #[cfg(debug_assertions)]
             exec_range: Range { start: 0, end: 0 },
             segment_registers: [0; 2],
+            rng: 0,
         }
     }
 
@@ -348,6 +370,17 @@ impl Emu {
                     }
                 };
             }
+            macro_rules! match_bitness {
+                ($id:ident, $bitness:expr) => {
+                    match $bitness {
+                        Bitness::Eight => $id!(u8),
+                        Bitness::Sixteen => $id!(u16),
+                        Bitness::ThirtyTwo => $id!(u32),
+                        Bitness::SixtyFour => $id!(u64),
+                        Bitness::HundredTwentyEigth => $id!(u128),
+                    }
+                };
+            }
 
             macro_rules! jmp {
                 () => {{
@@ -429,6 +462,12 @@ impl Emu {
                     if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 7) != 0 {
                         $code;
                     }
+                };
+                (ns,$code:expr) => {
+                    // if CF==0
+                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 7) == 0 {
+                        $code;
+                    }
                 }
             }
 
@@ -446,7 +485,7 @@ impl Emu {
                     let mut overflowing = false;
                     macro_rules! sized_add {
                         ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, _, $size>(instruction, |x, y| {
+                            self.do_loar_op::<$typ, $typ, _, $size, $size>(instruction, |x, y| {
                                 let a = x.overflowing_add(y);
                                 overflowing = a.1;
                                 a.0
@@ -465,7 +504,7 @@ impl Emu {
                     let mut overflowing = false;
                     macro_rules! sized_sub {
                         ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, _, $size>(instruction, |x, y| {
+                            self.do_loar_op::<$typ, $typ, _, $size, $size>(instruction, |x, y| {
                                 let a = x.overflowing_sub(y);
                                 overflowing = a.1;
                                 a.0
@@ -485,7 +524,7 @@ impl Emu {
                     let cf = self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0);
                     macro_rules! sized_sbb {
                         ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, _, $size>(instruction, |x, y| {
+                            self.do_loar_op::<$typ, $typ, _, $size, $size>(instruction, |x, y| {
                                 x - (y.wrapping_add(cf as $typ))
                             })?
                         };
@@ -497,7 +536,10 @@ impl Emu {
                     // shr, as documented by https://www.felixcloutier.com/x86/sal:sar:shl:shr
                     macro_rules! sized_shr {
                         ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, _, $size>(instruction, core::ops::Shr::shr)?
+                            self.do_loar_op::<$typ, $typ, _, $size, $size>(
+                                instruction,
+                                core::ops::Shr::shr,
+                            )?
                         };
                     }
 
@@ -509,7 +551,10 @@ impl Emu {
                     // we simply have to change our type to signed herewe simply have to change our type to signed here
                     macro_rules! sized_shr {
                         ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, _, $size>(instruction, core::ops::Shr::shr)?
+                            self.do_loar_op::<$typ, $typ, _, $size, $size>(
+                                instruction,
+                                core::ops::Shr::shr,
+                            )?
                         };
                     }
                     match bitness(instruction) {
@@ -522,10 +567,13 @@ impl Emu {
                 }
                 Mnemonic::Shl => {
                     // shl, as documented by https://www.felixcloutier.com/x86/sal:sar:shl:shr
+
                     macro_rules! sized_shr {
-                        ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, _, $size>(instruction, core::ops::Shl::shl)?
-                        };
+                        ($typ:ty,$size:literal) => {{
+                            let stfu =
+                                |lhs: $typ, rhs: u32| unsafe { <$typ>::unchecked_shl(lhs, rhs) };
+                            self.do_loar_op::<$typ, u32, _, $size, 4>(instruction, stfu)?
+                        }};
                     }
 
                     match_bitness_ts!(sized_shr)
@@ -534,7 +582,7 @@ impl Emu {
                     let cf = self.get_val::<u64, 8>(instruction, 2).unwrap_or(1);
                     macro_rules! sized_imul {
                         ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, _, $size>(instruction, |x, y| {
+                            self.do_loar_op::<$typ, $typ, _, $size, $size>(instruction, |x, y| {
                                 x.wrapping_mul(y.wrapping_mul(cf as $typ))
                             })?
                         };
@@ -597,7 +645,7 @@ impl Emu {
                     // as documented by https://www.felixcloutier.com/x86/and
                     macro_rules! sized_and {
                         ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, _, $size>(
+                            self.do_loar_op::<$typ, $typ, _, $size, $size>(
                                 instruction,
                                 core::ops::BitAnd::bitand,
                             )?
@@ -610,7 +658,7 @@ impl Emu {
                     // xor, as documented by https://www.felixcloutier.com/x86/xor
                     macro_rules! sized_xor {
                         ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, _, $size>(
+                            self.do_loar_op::<$typ, $typ, _, $size, $size>(
                                 instruction,
                                 core::ops::BitXor::bitxor,
                             )?
@@ -649,7 +697,10 @@ impl Emu {
                     // or, as documented by https://www.felixcloutier.com/x86/or
                     macro_rules! sized_or {
                         ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, _, $size>(instruction, core::ops::BitOr::bitor)?
+                            self.do_loar_op::<$typ, $typ, _, $size, $size>(
+                                instruction,
+                                core::ops::BitOr::bitor,
+                            )?
                         };
                     }
 
@@ -664,6 +715,36 @@ impl Emu {
                     let val = self.get_reg::<u32, 4>(Register::RAX) as i64 as u64;
                     self.set_reg(val as u32, Register::RAX);
                     self.set_reg((val >> 32) as u32, Register::RDX);
+                }
+
+                Mnemonic::Rol => {
+                    // shr, as documented by https://www.felixcloutier.com/x86/sal:sar:shl:shr
+
+                    macro_rules! sized_shr {
+                        ($typ:ty,$size:literal) => {
+                            self.do_loar_op::<$typ, u32, _, $size, 4>(
+                                instruction,
+                                <$typ>::rotate_left,
+                            )?
+                        };
+                    }
+
+                    match_bitness_ts!(sized_shr)
+                }
+
+                Mnemonic::Ror => {
+                    // shr, as documented by https://www.felixcloutier.com/x86/sal:sar:shl:shr
+
+                    macro_rules! sized_shr {
+                        ($typ:ty,$size:literal) => {
+                            self.do_loar_op::<$typ, u32, _, $size, 4>(
+                                instruction,
+                                <$typ>::rotate_right,
+                            )?
+                        };
+                    }
+
+                    match_bitness_ts!(sized_shr)
                 }
 
                 /*
@@ -757,6 +838,11 @@ impl Emu {
                         jmp!()
                     }
                 }
+                Mnemonic::Jns => {
+                    cc! { ns,
+                        jmp!()
+                    }
+                }
                 Mnemonic::Jmp => {
                     jmp!();
                 }
@@ -844,6 +930,35 @@ impl Emu {
                     cc! {b,
                         match_bitness_typ!(sized_mov)
                     }
+                }
+                Mnemonic::Cmpxchg => {
+                    let op1 = instruction.op1_register();
+                    let bittness = reg_bitness(op1);
+
+                    macro_rules! sized_cmkxchg {
+                        ($typ:ty) => {{
+                            let op0 = self.get_val(instruction, 0).unwrap();
+                            let rax: $typ = self.get_reg(Register::RAX);
+                            if rax == op0 {
+                                let reg = reg_from_iced_reg(op1).unwrap();
+                                let reg_val: $typ = self.get_reg(reg);
+                                self.set_val(instruction, 0, reg_val).unwrap();
+                                self.set_reg(op0, reg);
+                                self.set_reg(
+                                    self.get_reg::<u8, 1>(Register::RFLAGS) | (1 << 6),
+                                    Register::RFLAGS,
+                                )
+                            } else {
+                                self.set_reg(op0, Register::RAX);
+                                self.set_reg(
+                                    self.get_reg::<u8, 1>(Register::RFLAGS) ^ (1 << 6),
+                                    Register::RFLAGS,
+                                );
+                            }
+                        }};
+                    }
+
+                    match_bitness!(sized_cmkxchg, bittness);
                 }
                 Mnemonic::Mov => {
                     // mov, as documented by https://www.felixcloutier.com/x86/mov
@@ -937,6 +1052,17 @@ impl Emu {
                     // so TODO: inline the set_reg call performed here
                     self.set_val(instruction, 0, self.calc_addr(instruction))?;
                 }
+                Mnemonic::Xchg => {
+                    macro_rules! sized_xchg {
+                        ($typ:ty) => {{
+                            let val0: $typ = self.get_val(instruction, 0).unwrap();
+                            let val1: $typ = self.get_val(instruction, 1).unwrap();
+                            self.set_val(instruction, 0, val1).unwrap();
+                            self.set_val(instruction, 1, val0).unwrap();
+                        }};
+                    }
+                    match_bitness_typ!(sized_xchg);
+                }
                 /*
                         +-------------------------+
                         | String     Instructions |
@@ -1010,9 +1136,16 @@ impl Emu {
                     self.set_reg(new_val, Register::Xmm1);
                 }
                 Mnemonic::Punpcklqdq => {
-                    self.do_loar_op::<u128, _, 16>(instruction, |x, y| {
+                    self.do_loar_op::<u128, u128, _, 16, 16>(instruction, |x, y| {
                         (x & (u64::MAX as u128)) | ((y & (u64::MAX as u128)) << 64)
                     })?;
+                }
+                Mnemonic::Pxor => {
+                    self.do_loar_op::<u128, u128, _, 16, 16>(
+                        instruction,
+                        core::ops::BitXor::bitxor,
+                    )
+                    .unwrap();
                 }
                 Mnemonic::Movhps => match instruction.op0_kind() {
                     OpKind::Register => {
@@ -1022,7 +1155,7 @@ impl Emu {
                     OpKind::Memory => todo!(),
                     _ => unsafe { unreachable_unchecked() },
                 },
-                Mnemonic::Movaps | Mnemonic::Movdqa | Mnemonic::Movups => {
+                Mnemonic::Movaps | Mnemonic::Movdqa | Mnemonic::Movups | Mnemonic::Movdqu => {
                     let val: u128 = self.get_val(instruction, 1)?;
                     self.set_val(instruction, 0, val).unwrap();
                 }
@@ -1035,7 +1168,7 @@ impl Emu {
                 Mnemonic::Syscall => {
                     self.handle_syscall(self.get_reg(Register::RAX))?;
                 }
-                x => todo!("unsupported opcode: {x:?}"),
+                x => unsafe { todo!("unsupported opcode: {x:?} at IP {IP:#x}") },
             };
         }
     }
@@ -1086,7 +1219,7 @@ impl Emu {
                 } else {
                     // ignore deallocations for now
                     if let Some(addr) = self.memory.allocate(rdi as usize - self.memory.cur_alc.0) {
-                        self.set_reg(addr.1.0 + self.memory.cur_alc.0, Register::RAX)
+                        self.set_reg(addr.1 .0 + self.memory.cur_alc.0, Register::RAX)
                     }
                     // allocating memory failed
                     else {
@@ -1132,9 +1265,19 @@ impl Emu {
                     _ => self.set_reg(u64::MAX, Register::RAX),
                 }
             }
+
             218 => {
                 // do nothing for now
                 self.set_reg(1u64, Register::RAX)
+            }
+            // gettime
+            228 => {
+                let addr: usize = self.get_reg(Register::RSI);
+                let time: u64 = self.rng();
+                self.memory.write_primitive(Virtaddr(addr), time).unwrap();
+                self.memory
+                    .write_primitive(Virtaddr(addr + 8), time * 1_000_000_000)
+                    .unwrap();
             }
             273 => {
                 // do nothing for now
@@ -1143,6 +1286,31 @@ impl Emu {
             // exit
             231 => {
                 return Err(ExecErr::Exit { ip: unsafe { IP } });
+            }
+            267 => {
+                let bufsize: u64 = self.get_reg(Register::R10);
+                let path_ptr: u64 = self.get_reg(Register::RSI);
+                let path = self
+                    .memory
+                    .read_cstr(Virtaddr(path_ptr as usize), bufsize as usize)
+                    .to_vec();
+                let buf: usize = self.get_reg(Register::RDX);
+                self.memory.write_from(Virtaddr(buf), &path).unwrap();
+            }
+            // prlimit
+            302 => {
+                // do nothing for now
+                self.set_reg(0u64, Register::RAX)
+            }
+            // getrandom
+            318 => {
+                let buf: usize = self.get_reg(Register::RDI);
+                let count: usize = self.get_reg(Register::RSI);
+                for idx in 0..count {
+                    self.memory
+                        .write_primitive(Virtaddr(buf + idx), self.rng)
+                        .unwrap();
+                }
             }
             // rseq
             334 => {
@@ -1157,7 +1325,13 @@ impl Emu {
     /// currently it will only support doing an operation on the first 2 ops
     /// it also assumes that they both are equal in size
     #[inline]
-    pub fn do_loar_op<T: Primitive<BYTES>, F: FnMut(T, T) -> T, const BYTES: usize>(
+    pub fn do_loar_op<
+        T: Primitive<BYTES>,
+        T1: Primitive<BYTES1>,
+        F: FnMut(T, T1) -> T,
+        const BYTES: usize,
+        const BYTES1: usize,
+    >(
         &mut self,
         instruction: Instruction,
         mut f: F,
@@ -1172,9 +1346,18 @@ impl Emu {
         <T as TryInto<u32>>::Error: Debug,
         <T as TryInto<u64>>::Error: Debug,
         <T as TryInto<u128>>::Error: Debug,
+        <T1 as TryFrom<u8>>::Error: Debug,
+        <T1 as TryFrom<u16>>::Error: Debug,
+        <T1 as TryFrom<u32>>::Error: Debug,
+        <T1 as TryFrom<u64>>::Error: Debug,
+        <T1 as TryFrom<u128>>::Error: Debug,
+        <T1 as TryInto<u16>>::Error: Debug,
+        <T1 as TryInto<u32>>::Error: Debug,
+        <T1 as TryInto<u64>>::Error: Debug,
+        <T1 as TryInto<u128>>::Error: Debug,
     {
         // TODO: make the caller responsible for giving the right operands
-        let rhs: T = self.get_val::<T, BYTES>(instruction, 1)?;
+        let rhs: T1 = self.get_val::<T1, BYTES1>(instruction, 1)?;
         let lhs: T = self.get_val::<T, BYTES>(instruction, 0)?;
         let new_lhs = f(lhs, rhs);
         self.set_val(instruction, 0, new_lhs)
@@ -1469,6 +1652,8 @@ fn reg_from_iced_reg(reg: iced_x86::Register) -> Option<Register> {
         Register::AL => Some(RAX),
         Register::RCX => Some(RCX),
         Register::ECX => Some(RCX),
+        Register::CX => Some(RCX),
+        Register::CL => Some(RCX),
         Register::CH => Some(CH),
         Register::RDX => Some(RDX),
         Register::EDX => Some(RDX),
@@ -1477,6 +1662,7 @@ fn reg_from_iced_reg(reg: iced_x86::Register) -> Option<Register> {
         Register::DH => Some(DH),
         Register::RBX => Some(RBX),
         Register::EBX => Some(RBX),
+        Register::BL => Some(RBX),
         Register::RSP => Some(RSP),
         Register::RBP => Some(RBP),
         Register::EBP => Some(RBP),
@@ -1499,6 +1685,7 @@ fn reg_from_iced_reg(reg: iced_x86::Register) -> Option<Register> {
         Register::R13 => Some(R13),
         Register::R13D => Some(R13),
         Register::R14 => Some(R14),
+        Register::R14L => Some(R14),
         Register::R14D => Some(R14),
         Register::R15 => Some(R15),
         Register::R15D => Some(R15),
@@ -1506,6 +1693,9 @@ fn reg_from_iced_reg(reg: iced_x86::Register) -> Option<Register> {
         Register::RIP => Some(RIP),
         Register::XMM0 => Some(Xmm0),
         Register::XMM1 => Some(Xmm1),
+        Register::XMM2 => Some(Xmm2),
+        Register::XMM3 => Some(Xmm3),
+        Register::XMM4 => Some(Xmm4),
         x => todo!("implement register {x:?}"),
     }
 }
@@ -1520,66 +1710,7 @@ fn seg_from_iced_seg(reg: iced_x86::Register) -> Option<SegReg> {
 #[inline]
 fn bitness(instr: Instruction) -> Bitness {
     match instr.op0_kind() {
-        OpKind::Register => match instr.op0_register() {
-            // https://stackoverflow.com/questions/1753602/what-are-the-names-of-the-new-x86-64-processors-registers
-            iced_x86::Register::R8D
-            | iced_x86::Register::R9D
-            | iced_x86::Register::R10D
-            | iced_x86::Register::R11D
-            | iced_x86::Register::R12D
-            | iced_x86::Register::R13D
-            | iced_x86::Register::R14D
-            | iced_x86::Register::R15D => Bitness::ThirtyTwo,
-            iced_x86::Register::AL
-            | iced_x86::Register::CL
-            | iced_x86::Register::DL
-            | iced_x86::Register::BL
-            | iced_x86::Register::AH
-            | iced_x86::Register::CH
-            | iced_x86::Register::DH
-            | iced_x86::Register::BH
-            | iced_x86::Register::SPL
-            | iced_x86::Register::BPL
-            | iced_x86::Register::SIL
-            | iced_x86::Register::DIL => Bitness::Eight,
-            iced_x86::Register::R10L => Bitness::Eight,
-            iced_x86::Register::AX
-            | iced_x86::Register::CX
-            | iced_x86::Register::DX
-            | iced_x86::Register::BX
-            | iced_x86::Register::SP
-            | iced_x86::Register::BP
-            | iced_x86::Register::SI
-            | iced_x86::Register::DI => Bitness::Sixteen,
-            iced_x86::Register::EAX
-            | iced_x86::Register::ECX
-            | iced_x86::Register::EDX
-            | iced_x86::Register::EBX
-            | iced_x86::Register::ESP
-            | iced_x86::Register::EBP
-            | iced_x86::Register::ESI
-            | iced_x86::Register::EDI
-            | iced_x86::Register::EIP => Bitness::ThirtyTwo,
-            iced_x86::Register::RAX
-            | iced_x86::Register::RCX
-            | iced_x86::Register::RDX
-            | iced_x86::Register::RBX
-            | iced_x86::Register::RSP
-            | iced_x86::Register::RBP
-            | iced_x86::Register::RSI
-            | iced_x86::Register::RDI
-            | iced_x86::Register::R8
-            | iced_x86::Register::R9
-            | iced_x86::Register::R10
-            | iced_x86::Register::R11
-            | iced_x86::Register::R12
-            | iced_x86::Register::R13
-            | iced_x86::Register::R14
-            | iced_x86::Register::R15
-            | iced_x86::Register::RIP => Bitness::SixtyFour,
-            iced_x86::Register::XMM0 => Bitness::HundredTwentyEigth,
-            x => todo!("{x:?}"),
-        },
+        OpKind::Register => reg_bitness(instr.op0_register()),
         OpKind::NearBranch16 => Bitness::Sixteen,
         OpKind::NearBranch32 => Bitness::ThirtyTwo,
         OpKind::NearBranch64 => Bitness::SixtyFour,
@@ -1601,6 +1732,70 @@ fn bitness(instr: Instruction) -> Bitness {
             }
             x => todo!("{x:?}"),
         },
+        x => todo!("{x:?}"),
+    }
+}
+
+fn reg_bitness(reg: iced_x86::Register) -> Bitness {
+    match reg {
+        // https://stackoverflow.com/questions/1753602/what-are-the-names-of-the-new-x86-64-processors-registers
+        iced_x86::Register::R8D
+        | iced_x86::Register::R9D
+        | iced_x86::Register::R10D
+        | iced_x86::Register::R11D
+        | iced_x86::Register::R12D
+        | iced_x86::Register::R13D
+        | iced_x86::Register::R14D
+        | iced_x86::Register::R15D => Bitness::ThirtyTwo,
+        iced_x86::Register::AL
+        | iced_x86::Register::R14L
+        | iced_x86::Register::CL
+        | iced_x86::Register::DL
+        | iced_x86::Register::BL
+        | iced_x86::Register::AH
+        | iced_x86::Register::CH
+        | iced_x86::Register::DH
+        | iced_x86::Register::BH
+        | iced_x86::Register::SPL
+        | iced_x86::Register::BPL
+        | iced_x86::Register::SIL
+        | iced_x86::Register::DIL => Bitness::Eight,
+        iced_x86::Register::R10L => Bitness::Eight,
+        iced_x86::Register::AX
+        | iced_x86::Register::CX
+        | iced_x86::Register::DX
+        | iced_x86::Register::BX
+        | iced_x86::Register::SP
+        | iced_x86::Register::BP
+        | iced_x86::Register::SI
+        | iced_x86::Register::DI => Bitness::Sixteen,
+        iced_x86::Register::EAX
+        | iced_x86::Register::ECX
+        | iced_x86::Register::EDX
+        | iced_x86::Register::EBX
+        | iced_x86::Register::ESP
+        | iced_x86::Register::EBP
+        | iced_x86::Register::ESI
+        | iced_x86::Register::EDI
+        | iced_x86::Register::EIP => Bitness::ThirtyTwo,
+        iced_x86::Register::RAX
+        | iced_x86::Register::RCX
+        | iced_x86::Register::RDX
+        | iced_x86::Register::RBX
+        | iced_x86::Register::RSP
+        | iced_x86::Register::RBP
+        | iced_x86::Register::RSI
+        | iced_x86::Register::RDI
+        | iced_x86::Register::R8
+        | iced_x86::Register::R9
+        | iced_x86::Register::R10
+        | iced_x86::Register::R11
+        | iced_x86::Register::R12
+        | iced_x86::Register::R13
+        | iced_x86::Register::R14
+        | iced_x86::Register::R15
+        | iced_x86::Register::RIP => Bitness::SixtyFour,
+        iced_x86::Register::XMM0 => Bitness::HundredTwentyEigth,
         x => todo!("{x:?}"),
     }
 }

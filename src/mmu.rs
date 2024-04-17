@@ -298,8 +298,14 @@ impl MMU {
         }
 
         self.write_from(base, buf).unwrap();
-        
+
         Some((base, self.cur_alc))
+    }
+
+    pub fn read_cstr(&self, start_addr: Virtaddr, max_size: usize) -> &[u8] {
+        std::ffi::CStr::from_bytes_until_nul(&self.memory[start_addr.0..start_addr.0 + max_size])
+            .unwrap()
+            .to_bytes()
     }
     /// this function reads primitives as [u8; N],
     /// this is to circumvent the restriction of using generic const expressions
@@ -340,7 +346,10 @@ impl MMU {
     }
 
     pub fn get_sym(&self, addr: usize) -> &str {
-        self.symbol_table.get(&addr).unwrap()
+        self.symbol_table
+            .get(&addr)
+            .map(String::as_str)
+            .unwrap_or("<can't resolve>")
     }
 
     /// load an executable into the mmu to be executed later on
