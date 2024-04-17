@@ -830,6 +830,11 @@ impl Emu {
                         match_bitness_typ!(sized_mov)
                     }
                 }
+                Mnemonic::Cmovbe => {
+                    cc! {be,
+                        match_bitness_typ!(sized_mov)
+                    }
+                }
                 Mnemonic::Cmovg => {
                     cc! {g,
                         match_bitness_typ!(sized_mov)
@@ -1062,7 +1067,13 @@ impl Emu {
                 let rdi: u64 = self.get_reg(Register::RDI);
                 if rdi == 0 {
                     let rsi = self.get_reg::<u64, 8>(Register::RSI);
-                    self.memory.allocate(rsi as usize);
+                    if let Some(Virtaddr(addr)) = self.memory.allocate(rsi as usize) {
+                        self.set_reg(0, Register::RAX)
+                    }
+                    // allocating memory failed
+                    else {
+                        self.set_reg(u64::MAX, Register::RAX)
+                    }
                 } else {
                     todo!()
                 }
@@ -1088,7 +1099,7 @@ impl Emu {
                 // pretend you can
                 self.set_reg(0, Register::RAX)
             }
-            // arch_prctl (ignore this for now and see where it takes us)
+            // arch_prctl
             158 => {
                 match self.get_reg::<u64, 8>(Register::RDI) {
                     // ARCH_SET_GS
