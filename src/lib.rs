@@ -22,6 +22,7 @@ mod tests {
 
     #[test]
     fn emu_run_test() {
+
         let mut emu = emu::Emu::new(1024 * 1024 * 16);
         emu.load("./tests/a.out");
         emu.run_emu().unwrap();

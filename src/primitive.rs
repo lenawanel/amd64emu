@@ -1,3 +1,5 @@
+use std::ops::BitAnd;
+
 pub trait Primitive<const SIZE: usize>:
     Sized
     + core::fmt::Debug
@@ -14,6 +16,7 @@ pub trait Primitive<const SIZE: usize>:
     + TryFrom<u128>
     + TryFrom<usize>
     + Copy
+    + BitAnd<Output = Self>
 {
     const BYTES: usize = SIZE;
 
@@ -22,6 +25,12 @@ pub trait Primitive<const SIZE: usize>:
     fn from_ne_bytes(bytes: [u8; SIZE]) -> Self;
 
     fn to_ne_bytes(self) -> [u8; SIZE];
+
+    fn count_ones(self) -> u32;
+
+    fn is_zero(self) -> bool;
+
+    fn msb(self) -> bool;
 }
 
 macro_rules! impl_primitive {
@@ -44,6 +53,21 @@ macro_rules! impl_primitive {
                 // assert!(size == $bytes);
                 // let bytes = unsafe { core::mem::transmute::<[u8; size], [u8; $bytes]>(bytes) };
                 <$type>::to_ne_bytes(self)
+            }
+
+            #[inline(always)]
+            fn count_ones(self) -> u32 {
+                <$type>::count_ones(self)
+            }
+
+            #[inline(always)]
+            fn is_zero(self) -> bool {
+                self == 0
+            }
+
+            #[inline(always)]
+            fn msb(self) -> bool {
+                (self & (1 << (8 * $bytes - 1)) > 0)
             }
         }
     };

@@ -16,7 +16,7 @@ use std::{io::Write, ops::Range};
 
 pub struct Emu {
     pub memory: MMU,
-    registers: [u64; 18],
+    registers: [u64; 17],
     simd_registers: [u128; 16],
     segment_registers: [u64; 2],
     #[cfg(debug_assertions)]
@@ -24,6 +24,7 @@ pub struct Emu {
     #[cfg(debug_assertions)]
     exec_range: Range<usize>,
     rng: usize,
+    rflags: u64,
 }
 
 // TODO: avoid this
@@ -71,8 +72,7 @@ impl Emu {
     }
 
     fn push<const SIZE: usize>(&mut self, n: impl Primitive<SIZE>) -> Virtaddr {
-        let sp = self.get_reg::<u64, 8>(Register::RSP) as usize - SIZE;
-        self.memory
+        let sp = self.get_reg::<u64, 8>(Register::RSP) as usize - SIZE;        self.memory
             .write_primitive(Virtaddr(sp), n)
             .expect("Push failed");
         self.set_reg(sp, Register::RSP);
@@ -118,7 +118,7 @@ impl Emu {
     pub fn new(size: usize) -> Self {
         Self {
             memory: MMU::new(size),
-            registers: [0; 18],
+            registers: [0; 17],
             simd_registers: [0; 16],
             #[cfg(debug_assertions)]
             stack_depth: 0,
@@ -126,6 +126,7 @@ impl Emu {
             exec_range: Range { start: 0, end: 0 },
             segment_registers: [0; 2],
             rng: 0,
+            rflags: 0b10,
         }
     }
 
@@ -178,6 +179,27 @@ impl Emu {
             // we're the high part of a 16 bit lower register
             T::try_from(((self.registers[register as usize - 32] as u16) & 0xff_00) >> 8).unwrap()
         }
+    }
+
+    #[inline]
+    fn set_flag(&mut self, flag: Flag) {
+        self.rflags |= flag as u64;
+    }
+    #[inline]
+    fn set_flags(&mut self, flags: u64) {
+        self.rflags |= flags;
+    }
+    #[inline]
+    fn unset_flag(&mut self, flag: Flag) {
+        self.rflags &= !(flag as u64);
+    }
+    #[inline]
+    fn unset_flags(&mut self, flags: u64) {
+        self.rflags &= !flags;
+    }
+    #[inline]
+    fn get_flag(&self, flag: Flag) -> bool {
+        (self.rflags & flag as u64) > 0
     }
 
     #[inline]
@@ -401,71 +423,69 @@ impl Emu {
 
             macro_rules! cc {
                 (be,$code:expr) => {
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0
-                        || self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) != 0
+                    if self.get_flag(Flag::ZF)
+                        || self.get_flag(Flag::CF)
                     {
                         $code;
                     }
                 };
                 (ne,$code:expr) => {
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0 {
+                    if !self.get_flag(Flag::ZF) {
                         $code;
                     }
                 };
                 (e,$code:expr) => {
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0 {
+                    if self.get_flag(Flag::ZF) {
                         $code;
                     }
                 };
                 (b,$code:expr) => {
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) != 0 {
+                    if self.get_flag(Flag::CF) {
                         $code;
                     }
                 };
                 (le,$code:expr) => {
                     // if the ZF==1
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) != 0
+                    if self.get_flag(Flag::ZF)
                         // or SF!=OF
-                        || (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 11)).count_ones()
-                            != (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 7)).count_ones()
+                        || (self.get_flag(Flag::SF) != self.get_flag(Flag::OF))
                     {
                         $code;
                     }
                 };
                 (g,$code:expr) => {
                     // if ZF==0
-                    if self.get_reg::<u64, 8>(Register::RFLAGS) & (1 << 6) == 0
+                    if !self.get_flag(Flag::ZF)
                         // and SF==OF
-                        && (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 11)).count_ones()
-                            == (self.get_reg::<u16, 2>(Register::RFLAGS) & (1 << 7)).count_ones()
+                        && (self.get_flag(Flag::SF) == self.get_flag(Flag::OF))
                     {
                         $code;
                     }
                 };
                 (a,$code:expr) => {
                     // if ZF==0
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 6) == 0
+                    if !self.get_flag(Flag::ZF)
                         // and CF==0
-                        && self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) == 0
+                        && self.get_flag(Flag::CF)
                     {
                         $code;
                     }
                 };
                 (ae,$code:expr) => {
                     // if CF==0
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0) == 0 {
+                    if self.get_flag(Flag::CF) {
                         $code;
                     }
                 };
                 (s,$code:expr) => {
-                    // if CF==0
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 7) != 0 {
+                    // if SF==0
+                    if !self.get_flag(Flag::SF) {
                         $code;
                     }
                 };
                 (ns,$code:expr) => {
-                    // if CF==0
-                    if self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 7) == 0 {
+                    // if SF==0
+                    if !self.get_flag(Flag::SF) {
                         $code;
                     }
                 }
@@ -482,46 +502,81 @@ impl Emu {
                 */
                 Mnemonic::Add => {
                     // add, as documented by https://www.felixcloutier.com/x86/add
-                    let mut overflowing = false;
                     macro_rules! sized_add {
-                        ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, $typ, _, $size, $size>(instruction, |x, y| {
-                                let a = x.overflowing_add(y);
-                                overflowing = a.1;
-                                a.0
-                            })?
-                        };
+                        ($typ:ty,$size:literal) => {{
+                            let update_flags = |emu: &mut Emu, lhs: $typ, rhs: $typ, res: $typ| {
+                                let lhs_msb = lhs.msb();
+                                let rhs_msb = rhs.msb();
+                                let res_msb = res.msb();
+
+                                if lhs_msb == rhs_msb && res_msb != lhs_msb {
+                                    emu.set_flag(Flag::OF)
+                                } else {
+                                    emu.unset_flag(Flag::OF)
+                                }
+
+                                if (lhs_msb && rhs_msb) || ((lhs_msb || rhs_msb) && !res_msb) {
+                                    emu.set_flag(Flag::CF)
+                                } else {
+                                    emu.unset_flag(Flag::CF)
+                                }
+
+                                if (lhs & 0xf) + (rhs & 0xf) > 0xf {
+                                    emu.set_flag(Flag::AUXCF)
+                                } else {
+                                    emu.unset_flag(Flag::AUXCF)
+                                }
+                            };
+                            self.do_arith_op::<$typ, $typ, _, _, $size, $size>(
+                                instruction,
+                                <$typ>::wrapping_add,
+                                update_flags,
+                            )?
+                        }};
                     }
-                    self.set_reg(
-                        overflowing as u8 | self.get_reg::<u8, 1>(Register::RFLAGS),
-                        Register::RFLAGS,
-                    );
 
                     match_bitness_ts!(sized_add);
                 }
                 Mnemonic::Sub => {
                     // sub, as documented by https://www.felixcloutier.com/x86/sub
-                    let mut overflowing = false;
                     macro_rules! sized_sub {
-                        ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, $typ, _, $size, $size>(instruction, |x, y| {
-                                let a = x.overflowing_sub(y);
-                                overflowing = a.1;
-                                a.0
-                            })?
-                        };
-                    }
+                        ($typ:ty,$size:literal) => {{
+                            let update_flags = |emu: &mut Emu, lhs: $typ, rhs: $typ, res: $typ| {
+                                let lhs_msb = lhs.msb();
+                                let rhs_msb = rhs.msb();
+                                let res_msb = res.msb();
 
-                    self.set_reg(
-                        overflowing as u8 | self.get_reg::<u8, 1>(Register::RFLAGS),
-                        Register::RFLAGS,
-                    );
+                                if lhs_msb != rhs_msb && res_msb != lhs_msb {
+                                    emu.set_flag(Flag::OF)
+                                } else {
+                                    emu.unset_flag(Flag::OF)
+                                }
+
+                                if lhs < rhs {
+                                    emu.set_flag(Flag::CF)
+                                } else {
+                                    emu.unset_flag(Flag::CF)
+                                }
+
+                                if (lhs & 0xf) < (rhs & 0xf) {
+                                    emu.set_flag(Flag::AUXCF)
+                                } else {
+                                    emu.unset_flag(Flag::AUXCF)
+                                }
+                            };
+                            self.do_arith_op::<$typ, $typ, _, _, $size, $size>(
+                                instruction,
+                                <$typ>::wrapping_sub,
+                                update_flags,
+                            )?
+                        }};
+                    }
 
                     match_bitness_ts!(sized_sub)
                 }
                 Mnemonic::Sbb => {
                     // TODO: change this to use borrowed sub
-                    let cf = self.get_reg::<u8, 1>(Register::RFLAGS) & (1 << 0);
+                    let cf = self.get_flag(Flag::CF) as u8;
                     macro_rules! sized_sbb {
                         ($typ:ty,$size:literal) => {
                             self.do_loar_op::<$typ, $typ, _, $size, $size>(instruction, |x, y| {
@@ -809,7 +864,7 @@ impl Emu {
                     }
                 }
                 Mnemonic::Jb => {
-                    cc! { b,
+                    cc! {b,
                         jmp!()
                     }
                 }
@@ -849,31 +904,52 @@ impl Emu {
 
                 // | FLAGS setting instructions |
                 Mnemonic::Cmp => {
-                    // TODO: make this macro more generic, so
-                    // we can use it in other contexts as well
-
-                    // This is the cmp instruction as documented by https://www.felixcloutier.com/x86/cmp
-                    // note that https://www.felixcloutier.com/x86/jcc is more helpful for finding out when
-                    // to set which flag
                     macro_rules! cmp_with_type {
                         ($typ:ty) => {{
                             let lhs: $typ = self.get_val(instruction, 0)?;
                             let rhs: $typ = self.get_val(instruction, 1)?;
-                            // XXX: actually make this correct
-                            match lhs.cmp(&rhs) {
-                                // unset the carry flag and the zero flag if above
-                                core::cmp::Ordering::Greater => self.set_reg(
-                                    /* !*/
-                                    (0 << 6) | (0 << 0), /*& self.get_reg::<u64, 8>(Register::RFLAGS)*/
-                                    Register::RFLAGS,
-                                ),
-                                // set the zero flag if eq
-                                core::cmp::Ordering::Equal => self.set_reg(1 << 6, Register::RFLAGS),
-                                // unset the carry flag and set the zero flag if less
-                                core::cmp::Ordering::Less => self.set_reg(
-                                    (0 << 6) | (1 << 0), /*& self.get_reg::<u64, 8>(Register::RFLAGS)*/
-                                    Register::RFLAGS,
-                                ),
+                            let res = lhs.wrapping_sub(rhs);
+
+
+                            let lhs_msb = lhs.msb();
+                            let rhs_msb = rhs.msb();
+                            let res_msb = res.msb();
+
+                            if lhs_msb != rhs_msb && res_msb != lhs_msb {
+                                self.set_flag(Flag::OF)
+                            } else {
+                                self.unset_flag(Flag::OF)
+                            }
+
+                            if lhs < rhs {
+                                self.set_flag(Flag::CF)
+                            } else {
+                                self.unset_flag(Flag::CF)
+                            }
+
+                            if (lhs & 0xf) < (rhs & 0xf) {
+                                self.set_flag(Flag::AUXCF)
+                            } else {
+                                self.unset_flag(Flag::AUXCF)
+                            }
+                            let pf = (res.count_ones() & 1) != 0;
+                            let sf = res.msb();
+                            let zf = res.is_zero();
+
+                            if pf {
+                                self.set_flag(Flag::PF)
+                            } else {
+                                self.unset_flag(Flag::PF)
+                            }
+                            if sf {
+                                self.set_flag(Flag::SF)
+                            } else {
+                                self.unset_flag(Flag::SF)
+                            }
+                            if zf {
+                                self.set_flag(Flag::ZF)
+                            } else {
+                                self.unset_flag(Flag::ZF)
                             }
                         }};
                     }
@@ -881,14 +957,27 @@ impl Emu {
                     match_bitness_typ!(cmp_with_type)
                 }
                 Mnemonic::Test => {
-                    let lhs: usize = self.get_val(instruction, 0)?;
-                    let rhs: usize = self.get_val(instruction, 1)?;
-                    let and_res: usize = lhs & rhs;
-                    self.set_reg(
-                        // TODO: handle parity flag
-                        ((and_res & (1 << 63)) >> 56) | if and_res == 0 { 1 << 6 } else { 0 << 6 },
-                        Register::RFLAGS,
-                    );
+                    let lhs: u64 = self.get_val(instruction, 0)?;
+                    let rhs: u64 = self.get_val(instruction, 1)?;
+                    let and_res: u64 = lhs & rhs;
+                    let bitness = bitness(instruction);
+                    if (and_res & (1 << (bitness as u64 - 1))) > 0 {
+                        self.set_flag(Flag::SF)
+                    } else {
+                        self.unset_flag(Flag::SF)
+                    }
+                    self.unset_flag(Flag::OF);
+                    self.unset_flag(Flag::CF);
+                    if and_res == 0 {
+                        self.set_flag(Flag::ZF);
+                    } else {
+                        self.unset_flag(Flag::ZF);
+                    }
+                    if (and_res & 0xff).count_ones() & 1 > 0 {
+                        self.set_flag(Flag::PF);
+                    } else {
+                        self.unset_flag(Flag::PF);
+                    }
                 }
 
                 /*
@@ -944,16 +1033,10 @@ impl Emu {
                                 let reg_val: $typ = self.get_reg(reg);
                                 self.set_val(instruction, 0, reg_val).unwrap();
                                 self.set_reg(op0, reg);
-                                self.set_reg(
-                                    self.get_reg::<u8, 1>(Register::RFLAGS) | (1 << 6),
-                                    Register::RFLAGS,
-                                )
+                                self.set_flag(Flag::ZF);
                             } else {
                                 self.set_reg(op0, Register::RAX);
-                                self.set_reg(
-                                    self.get_reg::<u8, 1>(Register::RFLAGS) ^ (1 << 6),
-                                    Register::RFLAGS,
-                                );
+                                self.unset_flag(Flag::ZF);
                             }
                         }};
                     }
@@ -1089,7 +1172,7 @@ impl Emu {
                 Mnemonic::Sete => {
                     macro_rules! sized_sete {
                         ($typ:ty,$size:literal) => {{
-                            if self.get_reg::<$typ, $size>(Register::RFLAGS) & (1 << 6) != 0 {
+                            if self.get_flag(Flag::ZF) {
                                 self.set_val::<$typ, $size>(instruction, 0, 1)?;
                             } else {
                                 self.set_val::<$typ, $size>(instruction, 0, 0)?;
@@ -1101,7 +1184,7 @@ impl Emu {
                 Mnemonic::Setne => {
                     macro_rules! sized_sete {
                         ($typ:ty,$size:literal) => {{
-                            if self.get_reg::<$typ, $size>(Register::RFLAGS) & (1 << 6) == 0 {
+                            if !self.get_flag(Flag::ZF) {
                                 self.set_val::<$typ, $size>(instruction, 0, 1)?;
                             } else {
                                 self.set_val::<$typ, $size>(instruction, 0, 0)?;
@@ -1321,9 +1404,7 @@ impl Emu {
         };
         Ok(())
     }
-    /// perform a logical or arithmetic operation, given by `f`,on the given operands
-    /// currently it will only support doing an operation on the first 2 ops
-    /// it also assumes that they both are equal in size
+    /// perform a logical operation, given by `f`,on the given operands
     #[inline]
     pub fn do_loar_op<
         T: Primitive<BYTES>,
@@ -1361,6 +1442,74 @@ impl Emu {
         let lhs: T = self.get_val::<T, BYTES>(instruction, 0)?;
         let new_lhs = f(lhs, rhs);
         self.set_val(instruction, 0, new_lhs)
+    }
+
+    /// perform a arithmetic operation, given by `f`,on the given operands
+    /// first updates common arithmetic rflags and then updates the with the
+    /// supplied function `update_fags` gets run afterward
+    #[inline]
+    pub fn do_arith_op<
+        T: Primitive<BYTES>,
+        T1: Primitive<BYTES1>,
+        F: FnMut(T, T1) -> T,
+        U: FnMut(&mut Emu, T, T1, T),
+        const BYTES: usize,
+        const BYTES1: usize,
+    >(
+        &mut self,
+        instruction: Instruction,
+        mut f: F,
+        mut update_flags: U,
+    ) -> Result<()>
+    where
+        <T as TryFrom<u8>>::Error: Debug,
+        <T as TryFrom<u16>>::Error: Debug,
+        <T as TryFrom<u32>>::Error: Debug,
+        <T as TryFrom<u64>>::Error: Debug,
+        <T as TryFrom<u128>>::Error: Debug,
+        <T as TryInto<u16>>::Error: Debug,
+        <T as TryInto<u32>>::Error: Debug,
+        <T as TryInto<u64>>::Error: Debug,
+        <T as TryInto<u128>>::Error: Debug,
+        T: std::ops::Shr<usize, Output = T>,
+        <T1 as TryFrom<u8>>::Error: Debug,
+        <T1 as TryFrom<u16>>::Error: Debug,
+        <T1 as TryFrom<u32>>::Error: Debug,
+        <T1 as TryFrom<u64>>::Error: Debug,
+        <T1 as TryFrom<u128>>::Error: Debug,
+        <T1 as TryInto<u16>>::Error: Debug,
+        <T1 as TryInto<u32>>::Error: Debug,
+        <T1 as TryInto<u64>>::Error: Debug,
+        <T1 as TryInto<u128>>::Error: Debug,
+    {
+        // TODO: make the caller responsible for giving the right operands
+        let rhs: T1 = self.get_val::<T1, BYTES1>(instruction, 1)?;
+        let lhs: T = self.get_val::<T, BYTES>(instruction, 0)?;
+        let res = f(lhs, rhs);
+
+        let pf = (res.count_ones() & 1) != 0;
+        let sf = res.msb();
+        let zf = res.is_zero();
+
+        if pf {
+            self.set_flag(Flag::PF)
+        } else {
+            self.unset_flag(Flag::PF)
+        }
+        if sf {
+            self.set_flag(Flag::SF)
+        } else {
+            self.unset_flag(Flag::SF)
+        }
+        if zf {
+            self.set_flag(Flag::ZF)
+        } else {
+            self.unset_flag(Flag::ZF)
+        }
+
+        update_flags(self, lhs, rhs, res);
+
+        self.set_val(instruction, 0, res)
     }
 
     /// set an operand to a value.
@@ -1476,10 +1625,7 @@ impl Emu {
             println!("\x1b[38;2;255;100;0m{}\x1b[0m", instr_str);
         }
         println!("  Flag:   OD  SZ   P C");
-        println!(
-            "\x1b[1;92m  RFLAGS:\x1b[0m {:0>12b}",
-            self.get_reg::<u64, 8>(Register::RFLAGS)
-        );
+        println!("\x1b[1;92m  RFLAGS:\x1b[0m {:0>12b}", self.rflags);
         // pretty print the gprs
         for reg in (Register::RAX as u8)..=(Register::RSP as u8) {
             let reg = unsafe { core::mem::transmute::<u8, Register>(reg) };
@@ -1531,6 +1677,39 @@ pub enum SegReg {
     Fs,
     Gs,
 }
+/// the flags are as outlined [here](https://en.wikipedia.org/wiki/FLAGS_register/) <br\>
+/// mask: `1 << 0` Carry flag <br\>
+/// mask: `1 << 1` reserverd (should be 1) <br\>
+/// mask: `1 << 2` Parity flag <br\>
+/// mask: `1 << 3` Reserved <br\>
+/// mask: `1 << 4` Auxilliary Carry flag <br\>
+/// mask: `1 << 5` Reserved <br\>
+/// mask: `1 << 6` Zero flag <br\>
+/// mask: `1 << 7` Sign flag <br\>
+/// mask: `1 << 8` Trap flag <br\>
+/// mask: `1 << 9` Interrupt enable flag <\br>
+/// mask: `1 << 10` direction flag <\br>
+/// mask: `1 << 11` overflow flag <\br>
+enum Flag {
+    /// mask: `1 << 0` Carry flag
+    CF = 1 << 0,
+    /// mask: `1 << 2` Parity flag
+    PF = 1 << 2,
+    /// mask: `1 << 4` Auxilliary Carry flag
+    AUXCF = 1 << 4,
+    /// mask: `1 << 6` Zero flag
+    ZF = 1 << 6,
+    /// mask: `1 << 7` Sign flag
+    SF = 1 << 7,
+    /// mask: `1 << 8` Trap flag
+    TF = 1 << 8,
+    /// mask: `1 << 9` Interrupt enable flag
+    IEF = 1 << 9,
+    /// mask: `1 << 10` direction flag
+    DF = 1 << 10,
+    /// mask: `1 << 11` overflow flag
+    OF = 1 << 11,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Register {
@@ -1570,21 +1749,21 @@ pub enum Register {
     R14,
     /// general purpose register
     R15,
-    /// Flag register <br\>    
-    /// the flags are as outlined [here](https://en.wikipedia.org/wiki/FLAGS_register/) <br\>
-    /// mask: `1 << 0` Carry flag <br\>
-    /// mask: `1 << 1` reserverd (should be 1) <br\>
-    /// mask: `1 << 2` Parity flag <br\>
-    /// mask: `1 << 3` Reserved <br\>
-    /// mask: `1 << 4` Auxilliary Carry flag <br\>
-    /// mask: `1 << 5` Reserved <br\>
-    /// mask: `1 << 6` Zero flag <br\>
-    /// mask: `1 << 7` Sign flag <br\>
-    /// mask: `1 << 8` Trap flag <br\>
-    /// mask: `1 << 9` Interrupt enable flagi <\br>
-    /// mask: `1 << 10` direction flag <\br>
-    /// mask: `1 << 11` overflow flag <\br>
-    RFLAGS,
+    // Flag register <br\>
+    // the flags are as outlined [here](https://en.wikipedia.org/wiki/FLAGS_register/) <br\>
+    // mask: `1 << 0` Carry flag <br\>
+    // mask: `1 << 1` reserverd (should be 1) <br\>
+    // mask: `1 << 2` Parity flag <br\>
+    // mask: `1 << 3` Reserved <br\>
+    // mask: `1 << 4` Auxilliary Carry flag <br\>
+    // mask: `1 << 5` Reserved <br\>
+    // mask: `1 << 6` Zero flag <br\>
+    // mask: `1 << 7` Sign flag <br\>
+    // mask: `1 << 8` Trap flag <br\>
+    // mask: `1 << 9` Interrupt enable flagi <\br>
+    // mask: `1 << 10` direction flag <\br>
+    // mask: `1 << 11` overflow flag <\br>
+    // RFLAGS,
     // SIMD registers
     /// SIMD register, 128 bit
     Xmm0,
