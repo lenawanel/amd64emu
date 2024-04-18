@@ -72,7 +72,8 @@ impl Emu {
     }
 
     fn push<const SIZE: usize>(&mut self, n: impl Primitive<SIZE>) -> Virtaddr {
-        let sp = self.get_reg::<u64, 8>(Register::RSP) as usize - SIZE;        self.memory
+        let sp = self.get_reg::<u64, 8>(Register::RSP) as usize - SIZE;
+        self.memory
             .write_primitive(Virtaddr(sp), n)
             .expect("Push failed");
         self.set_reg(sp, Register::RSP);
@@ -109,6 +110,7 @@ impl Emu {
 
         // Set up the initial program stack state
         // self.push(auxv.0 as u64); // Auxp
+        // self.push(0u64); // Envp end
         self.push(0u64); // Envp end
         self.push(0u64); // Argv end
         self.push(argv.0); // Argv [0]
@@ -316,9 +318,9 @@ impl Emu {
                 // cls
                 print!("\x1b[2J\x1b[1;1H");
                 self.trace();
-                self.print_stack::<u64, 8>((self.stack_depth - 3 * 8).min(30 * 8));
+                self.print_stack::<u64, 8>((self.stack_depth - 3 * 8).min(30 * 16));
                 print!("\x1b[;96mcontinue?: \x1b[0m");
-                if false {
+                if true {
                     let _ = std::io::stdout().flush();
                     let mut str = String::new();
                     let _ = std::io::stdin().read_line(&mut str);
@@ -431,7 +433,10 @@ impl Emu {
                 };
                 (ne,$code:expr) => {
                     if !self.get_flag(Flag::ZF) {
+                        println!("\x1b[238;45;255;100;12m{:#b}\x1b[0m", self.rflags);
                         $code;
+                    } else {
+                        println!("\x1b[38;2;255;100;0m{:#b}\x1b[0m", self.rflags);
                     }
                 };
                 (e,$code:expr) => {
@@ -466,20 +471,20 @@ impl Emu {
                     // if ZF==0
                     if !self.get_flag(Flag::ZF)
                         // and CF==0
-                        && self.get_flag(Flag::CF)
+                        && !self.get_flag(Flag::CF)
                     {
                         $code;
                     }
                 };
                 (ae,$code:expr) => {
                     // if CF==0
-                    if self.get_flag(Flag::CF) {
+                    if !self.get_flag(Flag::CF) {
                         $code;
                     }
                 };
                 (s,$code:expr) => {
-                    // if SF==0
-                    if !self.get_flag(Flag::SF) {
+                    // if SF==1
+                    if self.get_flag(Flag::SF) {
                         $code;
                     }
                 };
@@ -909,7 +914,6 @@ impl Emu {
                             let lhs: $typ = self.get_val(instruction, 0)?;
                             let rhs: $typ = self.get_val(instruction, 1)?;
                             let res = lhs.wrapping_sub(rhs);
-
 
                             let lhs_msb = lhs.msb();
                             let rhs_msb = rhs.msb();
