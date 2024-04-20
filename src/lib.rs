@@ -31,7 +31,7 @@ mod tests {
     #[test]
     fn test_cmp_1_0() {
         test_flags_hw(
-            "
+            2, "
         mov rax, 1
         cmp rax, 0
         ",
@@ -40,26 +40,24 @@ mod tests {
 
     #[test]
     fn test_cmp_1_11() {
-        test_flags_hw(
-            "
-        mov rax, 1
-        cmp rax, 11
-        ",
+        test_flags_hw(0, 
+            "mov rax, 1
+        cmp rax, 11",
         );
     }
     #[test]
     fn test_sub_1_11() {
-        test_flags_hw(&format!(
+        test_flags_hw(1,&format!(
             "
         mov rax, {}
-        shl rax, {}
+        sub rax, {}
         ",
             u64::MAX - 1,
-             1
+            1
         ));
     }
 
-    fn test_flags_hw(code: &str) {
+    fn test_flags_hw(id: u64, code: &str) {
         let code = format!(
             "
         
@@ -74,17 +72,19 @@ _start:
         syscall                           ; invoke operating system to exit
         "
         );
-        let mut file = std::fs::File::create("test_flags.asm").unwrap();
+        let mut file = std::fs::File::create(format!("test_flags{id}.asm")).unwrap();
         file.write_all(code.as_bytes()).unwrap();
+
+        drop(file);
         assert!(Command::new("./assemble.sh")
-            .arg("test_flags.asm")
+            .arg(format!("test_flags{id}.asm"))
             .spawn()
             .unwrap()
             .wait()
             .unwrap()
             .success());
 
-        let flags_hw = Command::new("./test_flags")
+        let flags_hw = Command::new(format!("./test_flags{id}"))
             .spawn()
             .unwrap()
             .wait()
@@ -93,7 +93,9 @@ _start:
             .unwrap();
 
         let mut emu = emu::Emu::new(1024 * 1024 * 16);
-        emu.load("./test_flags");
+        emu.load(format!("test_flags{id}"));
+        std::fs::remove_file(format!("test_flags{id}.asm")).unwrap();
+        std::fs::remove_file(format!("test_flags{id}")).unwrap();
 
         match emu.run_emu() {
             Err(emu::ExecErr::Exit { code, .. }) => assert_eq!(code as i32, flags_hw),

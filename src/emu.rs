@@ -1346,12 +1346,14 @@ impl Emu {
                     self.set_reg(self.memory.cur_alc.0, Register::RAX);
                 } else {
                     // ignore deallocations for now
-                    if let Some(addr) = self.memory.allocate(rdi as usize - self.memory.cur_alc.0) {
-                        self.set_reg(addr.1 .0 + self.memory.cur_alc.0, Register::RAX)
+                    if let Some((_, addr)) =
+                        self.memory.allocate(rdi as usize - self.memory.cur_alc.0)
+                    {
+                        self.set_reg(addr.0, Register::RAX)
                     }
                     // allocating memory failed
                     else {
-                        self.set_reg(u64::MAX, Register::RAX)
+                        self.set_reg(-1i64, Register::RAX)
                     }
                 }
             }
@@ -1401,12 +1403,12 @@ impl Emu {
                     _ => self.set_reg(u64::MAX, Register::RAX),
                 }
             }
-
+            // set_tid_address
             218 => {
                 // do nothing for now
-                self.set_reg(1u64, Register::RAX)
+                self.set_reg(1000u64, Register::RAX)
             }
-            // gettime
+            // clock_gettime
             228 => {
                 let addr: usize = self.get_reg(Register::RSI);
                 let time: u64 = self.rng();
@@ -1414,7 +1416,9 @@ impl Emu {
                 self.memory
                     .write_primitive(Virtaddr(addr + 8), time * 1_000_000_000)
                     .unwrap();
+                self.set_reg(0u64, Register::RAX)
             }
+            // set_robust_list
             273 => {
                 // do nothing for now
                 self.set_reg(0u64, Register::RAX)
@@ -1427,6 +1431,7 @@ impl Emu {
                     ip: unsafe { IP },
                 });
             }
+            // readlinkat
             267 => {
                 let bufsize: u64 = self.get_reg(Register::R10);
                 let path_ptr: u64 = self.get_reg(Register::RSI);
@@ -1436,10 +1441,11 @@ impl Emu {
                     .to_vec();
                 let buf: usize = self.get_reg(Register::RDX);
                 self.memory.write_from(Virtaddr(buf), &path).unwrap();
+                self.set_reg(path.len() - 1, Register::RAX);
             }
             // prlimit
             302 => {
-                // do nothing for now
+                // say we succeded
                 self.set_reg(0u64, Register::RAX)
             }
             // getrandom
@@ -1864,16 +1870,16 @@ pub enum Register {
     /// SIMD register, 128 bit
     Xmm15,
     /// general purpose register
-    /// 16 bit hight bytes of `EAX`
+    /// 16 bit high byte of `EAX`
     AH,
     /// general purpose register
-    /// 16 bit hight bytes of `EBX`
+    /// 16 bit high byte of `EBX`
     BH,
     /// general purpose register
-    /// 16 bit hight bytes of `ECX`
+    /// 16 bit high byte of `ECX`
     CH,
     /// general purpose register
-    /// 16 bit hight bytes of `EDX`
+    /// 16 bit high byte of `EDX`
     DH,
 }
 
