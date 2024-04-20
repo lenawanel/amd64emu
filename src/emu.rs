@@ -1018,7 +1018,7 @@ impl Emu {
                     } else {
                         self.unset_flag(Flag::ZF);
                     }
-                    if (and_res & 0xff).count_ones() & 1 > 0 {
+                    if (and_res & 0xff).count_ones() & 1 == 0 {
                         self.set_flag(Flag::PF);
                     } else {
                         self.unset_flag(Flag::PF);
@@ -1102,11 +1102,14 @@ impl Emu {
                     // movsxd, as documented by https://www.felixcloutier.com/x86/movsx:movsxd
                     // let's hope that this sign extends
                     match bitness(instruction) {
-                        Bitness::Eight => sized_mov!(i8),
+                        Bitness::Eight => unsafe { unreachable_unchecked() },
                         Bitness::Sixteen => sized_mov!(i16),
                         Bitness::ThirtyTwo => sized_mov!(i32),
-                        Bitness::SixtyFour => sized_mov!(i64),
-                        Bitness::HundredTwentyEigth => sized_mov!(i128),
+                        Bitness::SixtyFour => {
+                            let val: i32 = self.get_val(instruction, 1)?;
+                            self.set_val(instruction, 0, val as i64)?;
+                        }
+                        Bitness::HundredTwentyEigth => unsafe { unreachable_unchecked() },
                     }
                 }
                 Mnemonic::Movzx => {
@@ -1218,28 +1221,10 @@ impl Emu {
                     }
                 }
                 Mnemonic::Sete => {
-                    macro_rules! sized_sete {
-                        ($typ:ty,$size:literal) => {{
-                            if self.get_flag(Flag::ZF) {
-                                self.set_val::<$typ, $size>(instruction, 0, 1)?;
-                            } else {
-                                self.set_val::<$typ, $size>(instruction, 0, 0)?;
-                            }
-                        }};
-                    }
-                    match_bitness_ts!(sized_sete)
+                    self.set_val(instruction, 0, self.get_flag(Flag::ZF) as u8)?;
                 }
                 Mnemonic::Setne => {
-                    macro_rules! sized_sete {
-                        ($typ:ty,$size:literal) => {{
-                            if !self.get_flag(Flag::ZF) {
-                                self.set_val::<$typ, $size>(instruction, 0, 1)?;
-                            } else {
-                                self.set_val::<$typ, $size>(instruction, 0, 0)?;
-                            }
-                        }};
-                    }
-                    match_bitness_ts!(sized_sete)
+                    self.set_val(instruction, 0, !self.get_flag(Flag::ZF) as u8)?;
                 }
                 /*
                         +----------------------+
