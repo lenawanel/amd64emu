@@ -39,7 +39,7 @@ impl Emu {
     where
         <T as TryFrom<usize>>::Error: Debug,
     {
-        self.rng = unsafe { self.rng.unchecked_add(1) };
+        self.rng = self.rng.wrapping_add(1);
         self.rng.try_into().unwrap()
     }
 
@@ -697,7 +697,43 @@ impl Emu {
                         };
                     }
 
-                    match_bitness_ts!(sized_imul);
+                    match bitness(instruction) {
+                        Bitness::Eight => todo!(),
+                        Bitness::Sixteen => sized_imul!(i16, 2),
+                        Bitness::ThirtyTwo => sized_imul!(i32, 4),
+                        Bitness::SixtyFour => sized_imul!(i64, 8),
+                        Bitness::HundredTwentyEigth => unsafe { unreachable_unchecked() },
+                    }
+                }
+                Mnemonic::Mul => {
+                    // TODO: handle 8 bit case
+
+                    macro_rules! sized_idiv {
+                        ($typ:ty,$size:literal) => {{
+                            let lhs: $typ = self.get_reg(Register::RAX);
+                            let rhs: $typ = self.get_val(instruction, 0)?;
+
+                            let (rax, rdx) = lhs.widening_mul(rhs);
+
+                            self.set_reg::<$typ, $size>(rax, Register::RAX);
+                            self.set_reg::<$typ, $size>(rdx, Register::RDX);
+                            // "CF, OF, SF, ZF, AF, and PF flags are undefined" (https://www.felixcloutier.com/x86/idiv)
+
+                            self.unset_flag(Flag::CF);
+                            self.unset_flag(Flag::OF);
+                            self.unset_flag(Flag::SF);
+                            self.unset_flag(Flag::ZF);
+                            self.unset_flag(Flag::AUXCF);
+                            self.unset_flag(Flag::PF);
+                        }};
+                    }
+                    match bitness(instruction) {
+                        Bitness::Eight => todo!(),
+                        Bitness::Sixteen => sized_idiv!(u16, 2),
+                        Bitness::ThirtyTwo => sized_idiv!(u32, 4),
+                        Bitness::SixtyFour => sized_idiv!(u64, 8),
+                        Bitness::HundredTwentyEigth => unsafe { unreachable_unchecked() },
+                    }
                 }
                 Mnemonic::Idiv => {
                     // TODO: handle 8 bit case

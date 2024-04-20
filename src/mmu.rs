@@ -238,9 +238,9 @@ impl MMU {
     /// Allocate a region of memory as RW in the address space
     /// returns (base, cur_alc)
     pub fn allocate(&mut self, size: usize) -> Option<(Virtaddr, Virtaddr)> {
-        // 32-byte align the allocation
+        // 16-byte align the allocation
         // this is required for SSE memcpy
-        let align_size = (size + 0x1f) & !0x1f;
+        let align_size = (size + 0xf) & !0xf;
 
         // Get the current allocation base
         let base = self.cur_alc;
@@ -275,9 +275,9 @@ impl MMU {
     /// Allocate a region the size of buf in memery as RW, writing buf to it
     /// returns (base, cur_alc)
     pub fn allocate_write(&mut self, buf: &[u8]) -> Option<(Virtaddr, Virtaddr)> {
-        // 32-byte align the allocation
+        // 16-byte align the allocation
         // this is required for SSE memcpy
-        let align_size = (buf.len() + 0x1f) & !0x1f;
+        let align_size = (buf.len() + 0xf) & !0xf;
 
         // Get the current allocation base
         let base = self.cur_alc;

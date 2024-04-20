@@ -1,7 +1,6 @@
 #![feature(portable_simd)]
 #![feature(thread_local)]
-#![feature(unchecked_math)]
-#![feature(unchecked_shifts)]
+#![feature(bigint_helper_methods)]
 pub mod emu;
 pub mod mmu;
 pub mod primitive;
