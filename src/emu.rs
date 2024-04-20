@@ -154,9 +154,9 @@ impl Emu {
         } else {
             // we're the high part of an register
             // so first mask off the unused bits
-            self.registers[register as usize - 32] &= !0xff_00;
+            self.registers[register as usize - 31] &= !0xff_00;
             // then set it to it's new value
-            self.registers[register as usize - 32] |=
+            self.registers[register as usize - 31] |=
                 TryInto::<u16>::try_into(val).unwrap().overflowing_shl(8).0 as u64;
         }
     }
@@ -179,7 +179,7 @@ impl Emu {
                 .unwrap()
         } else {
             // we're the high part of a 16 bit lower register
-            T::try_from(((self.registers[register as usize - 32] as u16) & 0xff_00) >> 8).unwrap()
+            T::try_from(((self.registers[register as usize - 31] as u16) & 0xff_00) >> 8).unwrap()
         }
     }
 
@@ -1067,9 +1067,9 @@ impl Emu {
                 }
                 Mnemonic::Cmpxchg => {
                     let op1 = instruction.op1_register();
-                    let bittness = reg_bitness(op1);
+                    let bitness = reg_bitness(op1);
 
-                    macro_rules! sized_cmkxchg {
+                    macro_rules! sized_cmpxchg {
                         ($typ:ty) => {{
                             let op0 = self.get_val(instruction, 0).unwrap();
                             let rax: $typ = self.get_reg(Register::RAX);
@@ -1086,7 +1086,7 @@ impl Emu {
                         }};
                     }
 
-                    match_bitness!(sized_cmkxchg, bittness);
+                    match_bitness!(sized_cmpxchg, bitness);
                 }
                 Mnemonic::Mov => {
                     // mov, as documented by https://www.felixcloutier.com/x86/mov
