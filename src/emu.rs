@@ -1431,7 +1431,7 @@ impl Emu {
                     self.set_reg(self.memory.cur_alc.0, Register::RAX);
                 } else {
                     // ignore deallocations for now
-                    if let Some((addr, _)) =
+                    if let Some((_, addr)) =
                         self.memory.allocate(rdi as usize - self.memory.cur_alc.0)
                     {
                         self.set_reg(addr.0, Register::RAX)
