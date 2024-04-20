@@ -154,9 +154,12 @@ impl Emu {
         } else {
             // we're the high part of an register
             // so first mask off the unused bits
-            self.registers[register as usize - 31] &= !0xff_00;
+            self.registers
+                [register as usize - self.registers.len() - self.simd_registers.len() + 1] &=
+                !0xff_00;
             // then set it to it's new value
-            self.registers[register as usize - 31] |=
+            self.registers
+                [register as usize - self.registers.len() - self.simd_registers.len() + 1] |=
                 TryInto::<u16>::try_into(val).unwrap().overflowing_shl(8).0 as u64;
         }
     }
@@ -179,7 +182,14 @@ impl Emu {
                 .unwrap()
         } else {
             // we're the high part of a 16 bit lower register
-            T::try_from(((self.registers[register as usize - 31] as u16) & 0xff_00) >> 8).unwrap()
+            T::try_from(
+                ((self.registers
+                    [register as usize - self.registers.len() - self.simd_registers.len() + 1]
+                    as u16)
+                    & 0xff_00)
+                    >> 8,
+            )
+            .unwrap()
         }
     }
 
@@ -1857,14 +1867,14 @@ pub enum Register {
     /// 16 bit hight bytes of `EAX`
     AH,
     /// general purpose register
+    /// 16 bit hight bytes of `EBX`
+    BH,
+    /// general purpose register
     /// 16 bit hight bytes of `ECX`
     CH,
     /// general purpose register
     /// 16 bit hight bytes of `EDX`
     DH,
-    /// general purpose register
-    /// 16 bit hight bytes of `EBX`
-    BH,
 }
 
 #[derive(Clone, Copy)]
