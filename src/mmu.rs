@@ -2,7 +2,7 @@
 //! credit goes to @gamozolabs
 
 use core::ops::Range;
-use std::path::Path;
+use std::{fmt::Debug, path::Path};
 
 use elf::{endian::AnyEndian, ElfBytes};
 
@@ -418,7 +418,7 @@ impl MMU {
                     // set the correct permissions
                     self.set_permissions(
                         Virtaddr(hdr.p_vaddr as usize),
-                        hdr.p_memsz as usize,
+                        hdr.p_memsz as usize + 0xf,
                         Perm(hdr.p_flags as u8),
                     )
                     .expect("failed to set the permisssions for the loaded segement");
@@ -512,8 +512,24 @@ pub enum AccessError {
 }
 
 #[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Perm(u8);
+
+impl Debug for Perm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut buf = String::new();
+        if (self.0 | PERM_READ.0) > 0 {
+            buf.push('R');
+        }
+        if (self.0 | PERM_WRITE.0) > 0 {
+            buf.push('W');
+        }
+        if (self.0 | PERM_EXEC.0) > 0 {
+            buf.push('X');
+        }
+        f.debug_tuple("Perm").field(&buf).finish()
+    }
+}
 
 /// permission to read a byte in memory
 pub const PERM_READ: Perm = Perm(1 << 2);

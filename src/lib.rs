@@ -9,6 +9,8 @@ mod symbol_table;
 
 #[cfg(test)]
 mod tests {
+    use std::{io::Write, process::Command};
+
     use super::*;
     // #[test]
     // fn bddisam_test() {
@@ -20,11 +22,82 @@ mod tests {
     //     let _ = decoded_inst.operands();
     // }
 
-    #[test]
-    fn emu_run_test() {
-
+    /*#[test]
+     fn emu_run_test() {
         let mut emu = emu::Emu::new(1024 * 1024 * 16);
         emu.load("./tests/a.out");
         emu.run_emu().unwrap();
+    } */
+    #[test]
+    fn test_cmp_1_0() {
+        test_flags_hw(
+            "
+        mov rax, 1
+        cmp rax, 0
+        ",
+        );
+    }
+
+    #[test]
+    fn test_cmp_1_11() {
+        test_flags_hw(
+            "
+        mov rax, 1
+        cmp rax, 11
+        ",
+        );
+    }
+    #[test]
+    fn test_sub_1_11() {
+        test_flags_hw(&format!(
+            "
+        mov rax, {}
+        shl rax, {}
+        ",
+            u64::MAX - 1,
+             1
+        ));
+    }
+
+    fn test_flags_hw(code: &str) {
+        let code = format!(
+            "
+        
+    global    _start
+
+    section   .text
+_start:
+        {code}
+        pushf
+        mov       rax, 60                 ; system call for exit
+        pop       rdi                     ; exit code rflags
+        syscall                           ; invoke operating system to exit
+        "
+        );
+        let mut file = std::fs::File::create("test_flags.asm").unwrap();
+        file.write_all(code.as_bytes()).unwrap();
+        assert!(Command::new("./assemble.sh")
+            .arg("test_flags.asm")
+            .spawn()
+            .unwrap()
+            .wait()
+            .unwrap()
+            .success());
+
+        let flags_hw = Command::new("./test_flags")
+            .spawn()
+            .unwrap()
+            .wait()
+            .unwrap()
+            .code()
+            .unwrap();
+
+        let mut emu = emu::Emu::new(1024 * 1024 * 16);
+        emu.load("./test_flags");
+
+        match emu.run_emu() {
+            Err(emu::ExecErr::Exit { code, .. }) => assert_eq!(code as i32, flags_hw),
+            x => panic!("{x:?}"),
+        }
     }
 }

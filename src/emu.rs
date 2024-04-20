@@ -188,20 +188,12 @@ impl Emu {
         self.rflags |= flag as u64;
     }
     #[inline]
-    fn set_flags(&mut self, flags: u64) {
-        self.rflags |= flags;
-    }
-    #[inline]
     fn unset_flag(&mut self, flag: Flag) {
         self.rflags &= !(flag as u64);
     }
     #[inline]
-    fn unset_flags(&mut self, flags: u64) {
-        self.rflags &= !flags;
-    }
-    #[inline]
     fn get_flag(&self, flag: Flag) -> bool {
-        (self.rflags & flag as u64) > 0
+        (self.rflags & flag as u64) != 0
     }
 
     #[inline]
@@ -433,10 +425,7 @@ impl Emu {
                 };
                 (ne,$code:expr) => {
                     if !self.get_flag(Flag::ZF) {
-                        println!("\x1b[238;45;255;100;12m{:#b}\x1b[0m", self.rflags);
                         $code;
-                    } else {
-                        println!("\x1b[38;2;255;100;0m{:#b}\x1b[0m", self.rflags);
                     }
                 };
                 (e,$code:expr) => {
@@ -483,7 +472,7 @@ impl Emu {
                     }
                 };
                 (s,$code:expr) => {
-                    // if SF==1
+                    // if SF== 1
                     if self.get_flag(Flag::SF) {
                         $code;
                     }
@@ -580,14 +569,43 @@ impl Emu {
                     match_bitness_ts!(sized_sub)
                 }
                 Mnemonic::Sbb => {
-                    // TODO: change this to use borrowed sub
-                    let cf = self.get_flag(Flag::CF) as u8;
                     macro_rules! sized_sbb {
-                        ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, $typ, _, $size, $size>(instruction, |x, y| {
-                                x - (y.wrapping_add(cf as $typ))
-                            })?
-                        };
+                        ($typ:ty,$size:literal) => {{
+                            let cf = self.get_flag(Flag::CF) as $typ;
+                            let update_flags = |emu: &mut Emu, lhs: $typ, rhs: $typ, res: $typ| {
+                                let rhs = rhs.wrapping_add(cf);
+
+                                let lhs_msb = lhs.msb();
+                                let rhs_msb = rhs.msb();
+                                let res_msb = res.msb();
+
+                                if lhs_msb != rhs_msb && res_msb != lhs_msb {
+                                    emu.set_flag(Flag::OF)
+                                } else {
+                                    emu.unset_flag(Flag::OF)
+                                }
+
+                                if lhs < rhs {
+                                    emu.set_flag(Flag::CF)
+                                } else {
+                                    emu.unset_flag(Flag::CF)
+                                }
+
+                                if (lhs & 0xf) < (rhs & 0xf) {
+                                    emu.set_flag(Flag::AUXCF)
+                                } else {
+                                    emu.unset_flag(Flag::AUXCF)
+                                }
+                            };
+                            self.do_arith_op::<$typ, $typ, _, _, $size, $size>(
+                                instruction,
+                                |lhs, rhs| {
+                                    let rhs = rhs.wrapping_add(cf);
+                                    lhs.wrapping_sub(rhs)
+                                },
+                                update_flags,
+                            )?
+                        }};
                     }
 
                     match_bitness_ts!(sized_sbb)
@@ -608,7 +626,7 @@ impl Emu {
                 Mnemonic::Sar => {
                     // sar, as documented by https://www.felixcloutier.com/x86/sal:sar:shl:shr
                     // as by https://www.reddit.com/r/rust/comments/2lp3il/where_is_arithmetic_signed_rightshift,
-                    // we simply have to change our type to signed herewe simply have to change our type to signed here
+                    // we simply have to change our type to signed here
                     macro_rules! sized_shr {
                         ($typ:ty,$size:literal) => {
                             self.do_loar_op::<$typ, $typ, _, $size, $size>(
@@ -628,17 +646,38 @@ impl Emu {
                 Mnemonic::Shl => {
                     // shl, as documented by https://www.felixcloutier.com/x86/sal:sar:shl:shr
 
-                    macro_rules! sized_shr {
+                    macro_rules! sized_shl {
                         ($typ:ty,$size:literal) => {{
-                            let stfu =
-                                |lhs: $typ, rhs: u32| unsafe { <$typ>::unchecked_shl(lhs, rhs) };
-                            self.do_loar_op::<$typ, u32, _, $size, 4>(instruction, stfu)?
+                            let update_flags = |emu: &mut Emu, lhs: $typ, rhs: u8, res: $typ| {
+                                let cf = lhs.wrapping_shl(rhs as u32 - 1).msb();
+                                if rhs != 0 {
+                                    if cf {
+                                        emu.set_flag(Flag::CF);
+                                    } else {
+                                        emu.unset_flag(Flag::CF);
+                                    }
+                                }
+                                if rhs == 1 {
+                                    if res.msb() == cf {
+                                        emu.unset_flag(Flag::OF);
+                                    } else {
+                                        emu.set_flag(Flag::OF);
+                                    }
+                                }
+                                // TODO: deal with auxillary carry flag
+                            };
+                            self.do_arith_op::<$typ, u8, _, _, $size, 1>(
+                                instruction,
+                                |lhs, rhs| lhs.wrapping_shl(rhs as u32),
+                                update_flags,
+                            )?
                         }};
                     }
 
-                    match_bitness_ts!(sized_shr)
+                    match_bitness_ts!(sized_shl)
                 }
                 Mnemonic::Imul => {
+                    assert!(instruction.op_count() > 1);
                     let cf = self.get_val::<u64, 8>(instruction, 2).unwrap_or(1);
                     macro_rules! sized_imul {
                         ($typ:ty,$size:literal) => {
@@ -652,7 +691,8 @@ impl Emu {
                 }
                 Mnemonic::Idiv => {
                     // TODO: handle 8 bit case
-                    macro_rules! sized_imul {
+                    // TODO: handle divide error
+                    macro_rules! sized_idiv {
                         ($typ:ty,$size:literal,$double_typ:ty) => {{
                             let lhs: $double_typ = ((self.get_reg::<$typ, $size>(Register::RDX)
                                 as $double_typ)
@@ -660,20 +700,29 @@ impl Emu {
                                 | (self.get_reg::<$typ, $size>(Register::RAX) as $double_typ);
                             let rhs: $double_typ =
                                 self.get_val::<$typ, $size>(instruction, 0)? as $double_typ;
+
                             self.set_reg::<$typ, $size>((lhs / rhs) as $typ, Register::RAX);
                             self.set_reg::<$typ, $size>((lhs % rhs) as $typ, Register::RDX);
+                            // "CF, OF, SF, ZF, AF, and PF flags are undefined" (https://www.felixcloutier.com/x86/idiv)
+                            self.unset_flag(Flag::CF);
+                            self.unset_flag(Flag::OF);
+                            self.unset_flag(Flag::SF);
+                            self.unset_flag(Flag::ZF);
+                            self.unset_flag(Flag::AUXCF);
+                            self.unset_flag(Flag::PF);
                         }};
                     }
                     match bitness(instruction) {
                         Bitness::Eight => todo!(),
-                        Bitness::Sixteen => sized_imul!(u16, 2, i32),
-                        Bitness::ThirtyTwo => sized_imul!(u32, 4, i64),
-                        Bitness::SixtyFour => sized_imul!(u64, 8, i128),
+                        Bitness::Sixteen => sized_idiv!(u16, 2, i32),
+                        Bitness::ThirtyTwo => sized_idiv!(u32, 4, i64),
+                        Bitness::SixtyFour => sized_idiv!(u64, 8, i128),
                         Bitness::HundredTwentyEigth => unsafe { unreachable_unchecked() },
                     }
                 }
                 Mnemonic::Div => {
                     // div, as documented by https://www.felixcloutier.com/x86/div
+                    // TODO: handle divide error
                     // TODO: handle 8 bit case
                     macro_rules! sized_imul {
                         ($typ:ty,$size:literal,$double_typ:ty) => {{
@@ -685,6 +734,13 @@ impl Emu {
                                 self.get_val::<$typ, $size>(instruction, 0)? as $double_typ;
                             self.set_reg::<$typ, $size>((lhs / rhs) as $typ, Register::RAX);
                             self.set_reg::<$typ, $size>((lhs % rhs) as $typ, Register::RDX);
+                            // "CF, OF, SF, ZF, AF, and PF flags are undefined" (https://www.felixcloutier.com/x86/div)
+                            self.unset_flag(Flag::CF);
+                            self.unset_flag(Flag::OF);
+                            self.unset_flag(Flag::SF);
+                            self.unset_flag(Flag::ZF);
+                            self.unset_flag(Flag::AUXCF);
+                            self.unset_flag(Flag::PF);
                         }};
                     }
                     match bitness(instruction) {
@@ -731,7 +787,9 @@ impl Emu {
                     macro_rules! sized_not {
                         ($typ:ty) => {{
                             let val: $typ = self.get_val(instruction, 0)?;
-                            self.set_val(instruction, 0, !val)?;
+                            let res = !val;
+                            self.set_val(instruction, 0, res)?;
+                            self.set_common_flags(res);
                         }};
                     }
 
@@ -741,7 +799,10 @@ impl Emu {
                     macro_rules! sized_neg {
                         ($typ:ty) => {{
                             let val: $typ = self.get_val(instruction, 0)?;
-                            self.set_val(instruction, 0, -val)?;
+
+                            let res = -val;
+                            self.set_val(instruction, 0, res)?;
+                            self.set_common_flags(res);
                         }};
                     }
 
@@ -767,14 +828,12 @@ impl Emu {
                     match_bitness_ts!(sized_or)
                 }
                 Mnemonic::Cqo => {
-                    let val = self.get_reg::<u64, 8>(Register::RAX) as i128 as u128;
-                    self.set_reg(val as u64, Register::RAX);
-                    self.set_reg((val >> 64) as u64, Register::RDX);
+                    let rdx = self.get_reg::<u64, 8>(Register::RAX).msb() as u64 * u64::MAX;
+                    self.set_reg(rdx, Register::RDX);
                 }
                 Mnemonic::Cdqe => {
-                    let val = self.get_reg::<u32, 4>(Register::RAX) as i64 as u64;
-                    self.set_reg(val as u32, Register::RAX);
-                    self.set_reg((val >> 32) as u32, Register::RDX);
+                    let val = self.get_reg::<u32, 4>(Register::RAX) as i32 as i64;
+                    self.set_reg(val, Register::RAX);
                 }
 
                 Mnemonic::Rol => {
@@ -936,25 +995,7 @@ impl Emu {
                             } else {
                                 self.unset_flag(Flag::AUXCF)
                             }
-                            let pf = (res.count_ones() & 1) != 0;
-                            let sf = res.msb();
-                            let zf = res.is_zero();
-
-                            if pf {
-                                self.set_flag(Flag::PF)
-                            } else {
-                                self.unset_flag(Flag::PF)
-                            }
-                            if sf {
-                                self.set_flag(Flag::SF)
-                            } else {
-                                self.unset_flag(Flag::SF)
-                            }
-                            if zf {
-                                self.set_flag(Flag::ZF)
-                            } else {
-                                self.unset_flag(Flag::ZF)
-                            }
+                            self.set_common_flags(res);
                         }};
                     }
 
@@ -1094,6 +1135,9 @@ impl Emu {
                     }
 
                     match_bitness_typ!(push_sized)
+                }
+                Mnemonic::Pushfq => {
+                    push!(self.rflags);
                 }
                 /*
                         +-----------------------------+
@@ -1270,8 +1314,10 @@ impl Emu {
                 let bytes = self
                     .memory
                     .peek(Virtaddr(addr as usize), size as usize, PERM_READ)?;
-                // if we're dealing with stdout
-                if self.get_reg::<u64, 8>(Register::RDI) == 2 {
+                // if we're dealing with stdout or stderr
+                if self.get_reg::<u64, 8>(Register::RDI) == 2
+                    || self.get_reg::<u64, 8>(Register::RDI) == 1
+                {
                     // first convert the given memory to a string
                     // unwrap here for now
                     let str = std::str::from_utf8(bytes).unwrap();
@@ -1318,6 +1364,14 @@ impl Emu {
             21 => {
                 // pretend you can
                 self.set_reg(0, Register::RAX)
+            }
+            // exit
+            60 => {
+                let code = self.get_reg(Register::RDI);
+                return Err(ExecErr::Exit {
+                    code,
+                    ip: unsafe { IP },
+                });
             }
             // arch_prctl
             158 => {
@@ -1372,7 +1426,11 @@ impl Emu {
             }
             // exit
             231 => {
-                return Err(ExecErr::Exit { ip: unsafe { IP } });
+                let code = self.get_reg(Register::RDI);
+                return Err(ExecErr::Exit {
+                    code,
+                    ip: unsafe { IP },
+                });
             }
             267 => {
                 let bufsize: u64 = self.get_reg(Register::R10);
@@ -1441,11 +1499,16 @@ impl Emu {
         <T1 as TryInto<u64>>::Error: Debug,
         <T1 as TryInto<u128>>::Error: Debug,
     {
-        // TODO: make the caller responsible for giving the right operands
         let rhs: T1 = self.get_val::<T1, BYTES1>(instruction, 1)?;
         let lhs: T = self.get_val::<T, BYTES>(instruction, 0)?;
-        let new_lhs = f(lhs, rhs);
-        self.set_val(instruction, 0, new_lhs)
+        let res = f(lhs, rhs);
+
+        self.set_common_flags(res);
+
+        self.unset_flag(Flag::OF);
+        self.unset_flag(Flag::CF);
+
+        self.set_val(instruction, 0, res)
     }
 
     /// perform a arithmetic operation, given by `f`,on the given operands
@@ -1491,7 +1554,15 @@ impl Emu {
         let lhs: T = self.get_val::<T, BYTES>(instruction, 0)?;
         let res = f(lhs, rhs);
 
-        let pf = (res.count_ones() & 1) != 0;
+        self.set_common_flags(res);
+
+        update_flags(self, lhs, rhs, res);
+
+        self.set_val(instruction, 0, res)
+    }
+
+    fn set_common_flags<const SIZE: usize>(&mut self, res: impl Primitive<SIZE>) {
+        let pf = (res.count_ones() & 1) == 0;
         let sf = res.msb();
         let zf = res.is_zero();
 
@@ -1510,10 +1581,6 @@ impl Emu {
         } else {
             self.unset_flag(Flag::ZF)
         }
-
-        update_flags(self, lhs, rhs, res);
-
-        self.set_val(instruction, 0, res)
     }
 
     /// set an operand to a value.
@@ -1665,7 +1732,7 @@ pub enum ExecErr {
     /// memory acces error
     AccErr { error: AccessError, ip: u64 },
     /// exit was called
-    Exit { ip: u64 },
+    Exit { code: u64, ip: u64 },
 }
 
 impl From<AccessError> for ExecErr {
@@ -1681,7 +1748,7 @@ pub enum SegReg {
     Fs,
     Gs,
 }
-/// the flags are as outlined [here](https://en.wikipedia.org/wiki/FLAGS_register/) <br\>
+/// the flags are as outlined [here](https://en.wikipedia.org/wiki/FLAGS_register) <br\>
 /// mask: `1 << 0` Carry flag <br\>
 /// mask: `1 << 1` reserverd (should be 1) <br\>
 /// mask: `1 << 2` Parity flag <br\>
@@ -1832,6 +1899,7 @@ fn reg_from_iced_reg(reg: iced_x86::Register) -> Option<Register> {
         Register::None => None,
         Register::RAX => Some(RAX),
         Register::EAX => Some(RAX),
+        Register::AX => Some(RAX),
         Register::AL => Some(RAX),
         Register::RCX => Some(RCX),
         Register::ECX => Some(RCX),
