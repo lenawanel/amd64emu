@@ -1,5 +1,8 @@
 use core::{fmt::Debug, hint::unreachable_unchecked};
-use std::path::Path;
+use std::{
+    path::Path,
+    simd::{cmp::SimdPartialEq, i8x16, u8x16, Mask, ToBytes},
+};
 
 // this is impossible to because of https://github.com/bitdefender/bddisasm/issues/82 ;(
 // use bddisasm::{operand::Operands, DecodedInstruction, OpInfo, Operand};
@@ -816,6 +819,30 @@ impl Emu {
 
                     match_bitness_ts!(sized_and)
                 }
+                Mnemonic::Bsf => {
+                    // as documented by https://www.felixcloutier.com/x86/bsf
+                    macro_rules! sized_bsf {
+                        ($typ:ty) => {{
+                            //  The CF, OF, SF, AF, and PF flags are undefined.
+                            let source: $typ = self.get_val(instruction, 1)?;
+
+                            self.unset_flag(Flag::CF);
+                            self.unset_flag(Flag::OF);
+                            self.unset_flag(Flag::SF);
+                            self.unset_flag(Flag::AUXCF);
+                            self.unset_flag(Flag::PF);
+
+                            if source == 0 {
+                                self.set_flag(Flag::ZF);
+                            } else {
+                                self.unset_flag(Flag::ZF);
+                                self.set_val(instruction, 0, source.trailing_zeros() as $typ)?;
+                            }
+                        }};
+                    }
+
+                    match_bitness_typ!(sized_bsf)
+                }
                 Mnemonic::Xor => {
                     // xor, as documented by https://www.felixcloutier.com/x86/xor
                     macro_rules! sized_xor {
@@ -1309,6 +1336,26 @@ impl Emu {
                     )
                     .unwrap();
                 }
+                Mnemonic::Pcmpeqb => {
+                    let lhs: u8x16 =
+                        u8x16::from_array(self.get_val::<u128, 16>(instruction, 0)?.to_ne_bytes());
+                    let rhs: u8x16 =
+                        u8x16::from_array(self.get_val::<u128, 16>(instruction, 1)?.to_ne_bytes());
+
+                    let val: u128 = unsafe { core::mem::transmute(lhs.simd_eq(rhs).to_int()) };
+
+                    if bitness(instruction) == Bitness::HundredTwentyEigth {
+                        self.set_val(instruction, 0, val)?;
+                    } else {
+                        self.set_val(instruction, 0, val as u64)?;
+                    }
+                }
+                Mnemonic::Pmovmskb => {
+                    let int: i8x16 =
+                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 1)?) };
+                    let mask: u64 = unsafe { Mask::from_int_unchecked(int).to_bitmask() };
+                    self.set_val(instruction, 0, mask)?;
+                }
                 Mnemonic::Movhps => match instruction.op0_kind() {
                     OpKind::Register => {
                         let val: u64 = self.get_val(instruction, 0)?;
@@ -1336,6 +1383,8 @@ impl Emu {
     }
 
     fn handle_syscall(&mut self, nr: usize) -> Result<()> {
+        // TODO: lots of syscalls here are implemented accordind to their libc wrappers
+        // TODO: implement them according to the linux kernel implementation
         match nr {
             // write
             1 => {
@@ -1382,7 +1431,7 @@ impl Emu {
                     self.set_reg(self.memory.cur_alc.0, Register::RAX);
                 } else {
                     // ignore deallocations for now
-                    if let Some((_, addr)) =
+                    if let Some((addr, _)) =
                         self.memory.allocate(rdi as usize - self.memory.cur_alc.0)
                     {
                         self.set_reg(addr.0, Register::RAX)
@@ -1919,7 +1968,7 @@ pub enum Register {
     DH,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum Bitness {
     Eight = 8,
@@ -2083,7 +2132,12 @@ fn reg_bitness(reg: iced_x86::Register) -> Bitness {
         | iced_x86::Register::R14
         | iced_x86::Register::R15
         | iced_x86::Register::RIP => Bitness::SixtyFour,
-        iced_x86::Register::XMM0 => Bitness::HundredTwentyEigth,
+        iced_x86::Register::XMM0
+        | iced_x86::Register::XMM1
+        | iced_x86::Register::XMM2
+        | iced_x86::Register::XMM3
+        | iced_x86::Register::XMM4 => Bitness::HundredTwentyEigth,
+
         x => todo!("{x:?}"),
     }
 }
