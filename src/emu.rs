@@ -1,9 +1,13 @@
 use core::{fmt::Debug, hint::unreachable_unchecked};
 use std::{
     path::Path,
-    simd::{cmp::SimdPartialEq, i8x16, u8x16, Mask, ToBytes},
+    simd::{
+        cmp::SimdPartialEq, i8x16, simd_swizzle, u16x8, u32x4, u32x8, u64x2, u8x16, u8x8, Mask,
+        Simd, ToBytes,
+    },
 };
 
+use elf::{endian::LittleEndian, file::FileHeader};
 // this is impossible to because of https://github.com/bitdefender/bddisasm/issues/82 ;(
 // use bddisasm::{operand::Operands, DecodedInstruction, OpInfo, Operand};
 use iced_x86::{Decoder, Formatter, Instruction, Mnemonic, NasmFormatter, OpKind};
@@ -47,10 +51,10 @@ impl Emu {
     }
 
     // for reference https://github.com/jart/blink/blob/master/blink/argv.c
-    fn prepare_auxv(&mut self, progname: Virtaddr) -> Virtaddr {
-        fn push_auxv(emu: &mut Emu, k: u64, v: u64) -> Virtaddr {
+    fn prepare_auxv(&mut self, progname: Virtaddr, ehdr: FileHeader<LittleEndian>) {
+        fn push_auxv(emu: &mut Emu, k: u64, v: u64) {
             emu.push(v);
-            emu.push(k)
+            emu.push(k);
         }
 
         let rand = self
@@ -71,21 +75,30 @@ impl Emu {
         push_auxv(self, 6, 4096);
         push_auxv(self, 17, 100);
         push_auxv(self, 25, rand.0 as u64);
-        push_auxv(self, 31, progname.0 as u64)
+        push_auxv(self, 31, progname.0 as u64);
+
+        // elf header info
+        // TODO: very dubious
+        push_auxv(self, 3, ehdr.e_phoff + 0x400000);
+        push_auxv(self, 4, ehdr.e_phentsize as u64);
+        push_auxv(self, 5, ehdr.e_phnum as u64);
+        push_auxv(self, 9, ehdr.e_entry);
+        push_auxv(self, 17, 100);
+
+        push_auxv(self, 7, 0x400000);
     }
 
-    fn push<const SIZE: usize>(&mut self, n: impl Primitive<SIZE>) -> Virtaddr {
+    fn push<const SIZE: usize>(&mut self, n: impl Primitive<SIZE>) {
         let sp = self.get_reg::<u64, 8>(Register::RSP) as usize - SIZE;
         self.memory
             .write_primitive(Virtaddr(sp), n)
             .expect("Push failed");
         self.set_reg(sp, Register::RSP);
-        return Virtaddr(sp);
     }
 
     pub fn load<P: AsRef<Path>>(&mut self, file: P) {
-        let (rip, frame, exec_range) = self.memory.load(file);
-        self.set_reg(rip.0 as u64, Register::RIP);
+        let (ehdr, frame, exec_range) = self.memory.load(file);
+        self.set_reg(ehdr.e_entry, Register::RIP);
         self.set_reg(frame.0 as u64, Register::RSP);
         // self.set_reg(frame.0 as u64 - 8, Register::RBP);
 
@@ -100,7 +113,7 @@ impl Emu {
             .allocate_write(b"/bin/test\0")
             .expect("Failed to write program name")
             .0;
-        let auxv = self.prepare_auxv(progname);
+        self.prepare_auxv(progname, ehdr);
 
         // Set up the program name
         let argv = self
@@ -456,6 +469,13 @@ impl Emu {
                     if self.get_flag(Flag::ZF)
                         // or SF!=OF
                         || (self.get_flag(Flag::SF) != self.get_flag(Flag::OF))
+                    {
+                        $code;
+                    }
+                };
+                (l,$code:expr) => {
+                    // if SF!=OF
+                    if self.get_flag(Flag::SF) != self.get_flag(Flag::OF)
                     {
                         $code;
                     }
@@ -843,6 +863,30 @@ impl Emu {
 
                     match_bitness_typ!(sized_bsf)
                 }
+                Mnemonic::Bsr => {
+                    // as documented by https://www.felixcloutier.com/x86/bsr
+                    macro_rules! sized_bsr {
+                        ($typ:ty) => {{
+                            //  The CF, OF, SF, AF, and PF flags are undefined.
+                            let source: $typ = self.get_val(instruction, 1)?;
+
+                            self.unset_flag(Flag::CF);
+                            self.unset_flag(Flag::OF);
+                            self.unset_flag(Flag::SF);
+                            self.unset_flag(Flag::AUXCF);
+                            self.unset_flag(Flag::PF);
+
+                            if source == 0 {
+                                self.set_flag(Flag::ZF);
+                            } else {
+                                self.unset_flag(Flag::ZF);
+                                self.set_val(instruction, 0, source.leading_zeros() as $typ)?;
+                            }
+                        }};
+                    }
+
+                    match_bitness_typ!(sized_bsr)
+                }
                 Mnemonic::Xor => {
                     // xor, as documented by https://www.felixcloutier.com/x86/xor
                     macro_rules! sized_xor {
@@ -1002,6 +1046,11 @@ impl Emu {
                 }
                 Mnemonic::Jb => {
                     cc! {b,
+                        jmp!()
+                    }
+                }
+                Mnemonic::Jl => {
+                    cc! { l,
                         jmp!()
                     }
                 }
@@ -1305,29 +1354,60 @@ impl Emu {
                         +----------------------+
                 */
                 Mnemonic::Punpckldq => {
-                    let lhs: core::simd::Simd<u32, 2> =
-                        core::simd::Simd::<u32, 2>::from_array(unsafe {
-                            core::mem::transmute::<u64, [u32; 2]>(
-                                self.get_val::<u64, 8>(instruction, 0)?,
-                            )
-                        });
-                    let rhs: core::simd::Simd<u32, 2> =
-                        core::simd::Simd::<u32, 2>::from_array(unsafe {
-                            core::mem::transmute::<u64, [u32; 2]>(
-                                self.get_val::<u64, 8>(instruction, 1)?,
-                            )
-                        });
-                    let inter = lhs.interleave(rhs);
-                    let mut buf = [0u32; 4];
-                    inter.0.copy_to_slice(&mut buf[..2]);
-                    inter.1.copy_to_slice(&mut buf[2..4]);
-                    let new_val = unsafe { core::mem::transmute::<[u32; 4], u128>(buf) };
-                    self.set_reg(new_val, Register::Xmm1);
+                    let lhs: u32x4 =
+                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 0)?) };
+                    let rhs =
+                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 1)?) };
+
+                    let val: u128 = unsafe { core::mem::transmute(lhs.interleave(rhs).0) };
+
+                    if bitness(instruction) == Bitness::HundredTwentyEigth {
+                        self.set_val(instruction, 0, val)?;
+                    } else {
+                        self.set_val(instruction, 0, val as u64)?;
+                    }
                 }
                 Mnemonic::Punpcklqdq => {
-                    self.do_loar_op::<u128, u128, _, 16, 16>(instruction, |x, y| {
-                        (x & (u64::MAX as u128)) | ((y & (u64::MAX as u128)) << 64)
-                    })?;
+                    let lhs: u64x2 =
+                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 0)?) };
+                    let rhs =
+                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 1)?) };
+
+                    let val: u128 = unsafe { core::mem::transmute(lhs.interleave(rhs).0) };
+
+                    if bitness(instruction) == Bitness::HundredTwentyEigth {
+                        self.set_val(instruction, 0, val)?;
+                    } else {
+                        self.set_val(instruction, 0, val as u64)?;
+                    }
+                }
+                Mnemonic::Punpcklbw => {
+                    let lhs: u8x16 =
+                        u8x16::from_array(self.get_val::<u128, 16>(instruction, 0)?.to_ne_bytes());
+                    let rhs: u8x16 =
+                        u8x16::from_array(self.get_val::<u128, 16>(instruction, 1)?.to_ne_bytes());
+
+                    let val: u128 = unsafe { core::mem::transmute(lhs.interleave(rhs).0) };
+
+                    if bitness(instruction) == Bitness::HundredTwentyEigth {
+                        self.set_val(instruction, 0, val)?;
+                    } else {
+                        self.set_val(instruction, 0, val as u64)?;
+                    }
+                }
+                Mnemonic::Punpcklwd => {
+                    let lhs: u16x8 =
+                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 0)?) };
+                    let rhs =
+                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 1)?) };
+
+                    let val: u128 = unsafe { core::mem::transmute(lhs.interleave(rhs).0) };
+
+                    if bitness(instruction) == Bitness::HundredTwentyEigth {
+                        self.set_val(instruction, 0, val)?;
+                    } else {
+                        self.set_val(instruction, 0, val as u64)?;
+                    }
                 }
                 Mnemonic::Pxor => {
                     self.do_loar_op::<u128, u128, _, 16, 16>(
@@ -1341,6 +1421,20 @@ impl Emu {
                         u8x16::from_array(self.get_val::<u128, 16>(instruction, 0)?.to_ne_bytes());
                     let rhs: u8x16 =
                         u8x16::from_array(self.get_val::<u128, 16>(instruction, 1)?.to_ne_bytes());
+
+                    let val: u128 = unsafe { core::mem::transmute(lhs.simd_eq(rhs).to_int()) };
+
+                    if bitness(instruction) == Bitness::HundredTwentyEigth {
+                        self.set_val(instruction, 0, val)?;
+                    } else {
+                        self.set_val(instruction, 0, val as u64)?;
+                    }
+                }
+                Mnemonic::Pcmpeqd => {
+                    let lhs: u32x4 =
+                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 0)?) };
+                    let rhs =
+                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 1)?) };
 
                     let val: u128 = unsafe { core::mem::transmute(lhs.simd_eq(rhs).to_int()) };
 
@@ -1367,6 +1461,35 @@ impl Emu {
                 Mnemonic::Movaps | Mnemonic::Movdqa | Mnemonic::Movups | Mnemonic::Movdqu => {
                     let val: u128 = self.get_val(instruction, 1)?;
                     self.set_val(instruction, 0, val).unwrap();
+                }
+                Mnemonic::Pshufd => {
+                    let imm = instruction.immediate8();
+                    let bite1 = imm & 0b11;
+                    let bite2 = (imm >> 2) & 0b11;
+                    let bite3 = (imm >> 4) & 0b11;
+                    let bite4 = (imm >> 6) & 0b11;
+
+                    let src: u8x16 =
+                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 1)?) };
+
+                    let idxs = Simd::from_array([bite1, bite2, bite3, bite4]);
+                    // hack our way around rust's swizzle's limits
+                    let v1 = simd_swizzle!(src, [0, 4, 8, 12]);
+                    let v2 = simd_swizzle!(src, [1, 5, 9, 13]);
+                    let v3 = simd_swizzle!(src, [2, 6, 10, 14]);
+                    let v4 = simd_swizzle!(src, [3, 7, 11, 15]);
+
+                    let shuf1 = v1.swizzle_dyn(idxs);
+                    let shuf2 = v2.swizzle_dyn(idxs);
+                    let shuf3 = v3.swizzle_dyn(idxs);
+                    let shuf4 = v4.swizzle_dyn(idxs);
+
+                    let shuf12: u8x8 = unsafe { core::mem::transmute(shuf1.interleave(shuf2)) };
+                    let shuf34: u8x8 = unsafe { core::mem::transmute(shuf3.interleave(shuf4)) };
+
+                    let shuf: u128 = unsafe { core::mem::transmute(shuf12.interleave(shuf34)) };
+
+                    self.set_val(instruction, 0, shuf)?;
                 }
 
                 /*
@@ -1423,6 +1546,11 @@ impl Emu {
                 } else {
                     todo!()
                 }
+            }
+            // mprotect
+            10 => {
+                // TODO: actually do the work here
+                self.set_reg(0u64, Register::RAX);
             }
             // brk
             12 => {
@@ -1524,9 +1652,17 @@ impl Emu {
                     .memory
                     .read_cstr(Virtaddr(path_ptr as usize), bufsize as usize)
                     .to_vec();
+                // if the application asked for its own path
+                if &path == b"/proc/self/exe" {
+                    let path = b"/bin/test";
+                    let buf: usize = self.get_reg(Register::RDX);
+                    self.memory.write_from(Virtaddr(buf), path).unwrap();
+                    self.set_reg(path.len(), Register::RAX);
+                    return Ok(());
+                }
                 let buf: usize = self.get_reg(Register::RDX);
                 self.memory.write_from(Virtaddr(buf), &path).unwrap();
-                self.set_reg(path.len() - 1, Register::RAX);
+                self.set_reg(path.len(), Register::RAX);
             }
             // prlimit
             302 => {
@@ -2008,6 +2144,7 @@ fn reg_from_iced_reg(reg: iced_x86::Register) -> Option<Register> {
         Register::SIL => Some(RSI),
         Register::RDI => Some(RDI),
         Register::EDI => Some(RDI),
+        Register::DIL => Some(RDI),
         Register::R8 => Some(R8),
         Register::R8D => Some(R8),
         Register::R9 => Some(R9),

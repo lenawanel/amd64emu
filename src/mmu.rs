@@ -4,7 +4,10 @@
 use core::ops::Range;
 use std::{fmt::Debug, path::Path};
 
-use elf::{endian::AnyEndian, ElfBytes};
+use elf::{
+    endian::{AnyEndian, LittleEndian},
+    ElfBytes,
+};
 
 use crate::{primitive::Primitive, symbol_table::SymbolTable};
 
@@ -355,7 +358,10 @@ impl MMU {
     /// load an executable into the mmu to be executed later on
     /// this function pancis if it fails in any way
     /// gievs back `(entry_point, frame_pointer)`
-    pub fn load<P: AsRef<Path>>(&mut self, filename: P) -> (Virtaddr, Virtaddr, Range<usize>) {
+    pub fn load<P: AsRef<Path>>(
+        &mut self,
+        filename: P,
+    ) -> (elf::file::FileHeader<LittleEndian>, Virtaddr, Range<usize>) {
         let data = std::fs::read(filename).expect("failed to read the supplied elf file");
 
         let mut last_loaded_section = 0;
@@ -363,7 +369,7 @@ impl MMU {
         let mut exec_range = Range { start: 0, end: 0 };
 
         // parse the elf
-        let elf = ElfBytes::<AnyEndian>::minimal_parse(&data)
+        let elf = ElfBytes::<LittleEndian>::minimal_parse(&data)
             .expect("failed to parse the supplied elf file");
 
         // get the symbol table
@@ -374,12 +380,15 @@ impl MMU {
             self.symbol_table.insert(addr as usize, name.to_string());
         }
 
+    
+
         for hdr in elf
             .segments()
             .expect("failed parsing program headers of the elf")
         {
             match hdr.p_type {
-                1 => {
+                // TLS or LOAD
+                1 | 7 => {
                     // set the correct permissions
                     self.set_permissions(
                         Virtaddr(hdr.p_vaddr as usize),
@@ -431,6 +440,7 @@ impl MMU {
                 }
                 // if section type is INTERP, panic for now
                 3 => todo!("make dynamic executables run"),
+
                 // load the LOAD type sections
                 x => println!("not loading section of type: {x}"),
             }
@@ -451,7 +461,7 @@ impl MMU {
 
         // get the entry point and return it to the emulator
         (
-            Virtaddr(elf.ehdr.e_entry as usize),
+            elf.ehdr,
             Virtaddr(last_loaded_section as usize + STACK_SIZE + 16),
             exec_range,
         )
@@ -518,14 +528,20 @@ pub struct Perm(u8);
 impl Debug for Perm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut buf = String::new();
-        if (self.0 | PERM_READ.0) > 0 {
+        if (self.0 & PERM_READ.0) > 0 {
             buf.push('R');
+        } else {
+            buf.push('-');
         }
-        if (self.0 | PERM_WRITE.0) > 0 {
+        if (self.0 & PERM_WRITE.0) > 0 {
             buf.push('W');
+        } else {
+            buf.push('-');
         }
-        if (self.0 | PERM_EXEC.0) > 0 {
+        if (self.0 & PERM_EXEC.0) > 0 {
             buf.push('X');
+        } else {
+            buf.push('-');
         }
         f.debug_tuple("Perm").field(&buf).finish()
     }
