@@ -6,6 +6,7 @@ use std::{fmt::Debug, path::Path};
 
 use elf::{
     endian::{AnyEndian, LittleEndian},
+    parse::ParseAt,
     ElfBytes,
 };
 
@@ -29,7 +30,7 @@ pub struct MMU {
 /// It seems the sweet spot is often 128-4096 bytes
 pub const DIRTY_BLOCK_SIZE: usize = 64;
 
-const STACK_SIZE: usize = 1024 * 1014;
+const STACK_SIZE: usize = 4096 * 0x10;
 
 type Result<T> = std::result::Result<T, AccessError>;
 
@@ -207,6 +208,10 @@ impl MMU {
         addr: Virtaddr,
         value: T,
     ) -> Result<()> {
+        if addr.0 == 0x00474688 {
+            panic!()
+        }
+
         // check if we are not writing past the memory buffer
         if addr.0 + std::mem::size_of::<T>() > self.memory.len() {
             return Err(AccessError::AddrOOB);
@@ -218,6 +223,35 @@ impl MMU {
             .all(|perm| (*perm & PERM_WRITE).0 != 0)
         {
             return Err(AccessError::PermErr(addr, self.permissions[addr.0]));
+        }
+
+        // acutally write the requested memory
+        // the pointer casting here is needed,
+        // since rust places an restriction of using `std::mem::sizeof::<T>()`
+        // in the construction of arrays
+        self.memory[addr.0..addr.0 + std::mem::size_of::<T>()]
+            .copy_from_slice(&value.to_ne_bytes());
+        // self.memory[addr.0..addr.0 + std::mem::size_of::<T>()]
+        //     .copy_from_slice(&value.to_ne_bytes());
+
+        let block_start = addr.to_dirty_block();
+        let block_end = Virtaddr(addr.0 + std::mem::size_of::<T>()).to_dirty_block();
+        for block in block_start..=block_end {
+            self.update_dirty(block)
+        }
+
+        Ok(())
+    }
+
+    /// write a primitive type to memory
+    fn write_primitive_no_check<T: Primitive<BYTES>, const BYTES: usize>(
+        &mut self,
+        addr: Virtaddr,
+        value: T,
+    ) -> Result<()> {
+        // check if we are not writing past the memory buffer
+        if addr.0 + std::mem::size_of::<T>() > self.memory.len() {
+            return Err(AccessError::AddrOOB);
         }
 
         // acutally write the requested memory
@@ -338,9 +372,10 @@ impl MMU {
     /// get acces to a mutable slice of memory
     pub fn peek(&self, addr: Virtaddr, size: usize, exp_perms: Perm) -> Result<&[u8]> {
         // check if we have the permission
-        if !self.permissions[addr.0..addr.0 + size]
-            .iter()
-            .all(|perm| (*perm & exp_perms).0 != 0)
+        if exp_perms != Perm(0)
+            && !self.permissions[addr.0..addr.0 + size]
+                .iter()
+                .all(|perm| (*perm & exp_perms).0 != 0)
         {
             return Err(AccessError::PermErr(addr, self.permissions[addr.0]));
         }
@@ -373,14 +408,15 @@ impl MMU {
             .expect("failed to parse the supplied elf file");
 
         // get the symbol table
+        // let mut sym_table = Vec::new();
         let (sym_tab, string_tab) = elf.symbol_table().unwrap().unwrap();
-        for symbol in sym_tab {
+        for symbol in sym_tab.clone() {
+            // sym_table .push(symbol);
             let name = string_tab.get(symbol.st_name as usize).unwrap();
             let addr = symbol.st_value;
+
             self.symbol_table.insert(addr as usize, name.to_string());
         }
-
-    
 
         for hdr in elf
             .segments()
@@ -388,7 +424,10 @@ impl MMU {
         {
             match hdr.p_type {
                 // TLS or LOAD
-                1 | 7 => {
+                1 | 7 | 4 => {
+                    if hdr.p_memsz == 0 {
+                        continue;
+                    }
                     // set the correct permissions
                     self.set_permissions(
                         Virtaddr(hdr.p_vaddr as usize),
@@ -400,26 +439,31 @@ impl MMU {
                     println!(
                         "loading section to: {:#x}...{:#x}",
                         hdr.p_vaddr,
-                        hdr.p_vaddr + hdr.p_filesz
+                        hdr.p_vaddr + hdr.p_memsz
                     );
+
+                    /* if let Ok(relocs) = elf.section_data_as_relas(&hdr) {
+
+                    } */
 
                     // load the section to the correct virtual adresses
                     self.write_from(
                         Virtaddr(hdr.p_vaddr as usize),
-                        data.get(hdr.p_offset as usize..(hdr.p_offset + hdr.p_filesz) as usize)
-                            .expect("failed to load file section"),
+                        elf.segment_data(&hdr).expect("failed to load file section"),
                     )
                     .expect("failed to write elf to memory");
+                    assert!(elf.segment_data(&hdr).unwrap().len() == hdr.p_filesz as usize);
 
                     // apply padding
-                    if hdr.p_memsz > hdr.p_filesz {
+                    /* if hdr.p_memsz > hdr.p_filesz {
                         let padding = vec![0u8; (hdr.p_memsz - hdr.p_filesz) as usize];
                         self.write_from(
                             Virtaddr(hdr.p_vaddr.checked_add(hdr.p_filesz).unwrap() as usize),
                             &padding,
                         )
                         .expect("somehow faild to apply padding to elf section");
-                    }
+
+                    }*/
 
                     last_loaded_section =
                         std::cmp::max(hdr.p_vaddr + hdr.p_filesz, last_loaded_section);
@@ -427,7 +471,7 @@ impl MMU {
                     // set the correct permissions
                     self.set_permissions(
                         Virtaddr(hdr.p_vaddr as usize),
-                        hdr.p_memsz as usize + 0xf,
+                        hdr.p_memsz as usize + 14,
                         Perm(hdr.p_flags as u8),
                     )
                     .expect("failed to set the permisssions for the loaded segement");
@@ -435,43 +479,90 @@ impl MMU {
                     // if this section has exec permissions
                     if hdr.p_flags & (PERM_EXEC.0 as u32) != 0 {
                         // set this to our executable region
-                        exec_range = hdr.p_paddr as usize..(hdr.p_paddr + hdr.p_memsz) as usize;
+                        exec_range =
+                            hdr.p_vaddr as usize..(hdr.p_vaddr + hdr.p_memsz + 0xff) as usize;
                     }
                 }
                 // if section type is INTERP, panic for now
                 3 => todo!("make dynamic executables run"),
+                // GNU relro
+                1685382482 => {
+                    println!(
+                        "GNU relro at: {:#x}...{:#x}",
+                        hdr.p_vaddr,
+                        hdr.p_vaddr + hdr.p_filesz
+                    );
+                    self.set_permissions(
+                        Virtaddr(hdr.p_vaddr as usize),
+                        hdr.p_memsz as usize,
+                        PERM_READ | PERM_WRITE,
+                    )
+                    .unwrap();
 
+                    // load the section to the correct virtual adresses
+                    self.write_from(
+                        Virtaddr(hdr.p_vaddr as usize),
+                        elf.segment_data(&hdr).expect("failed to load file section"),
+                    )
+                    .expect("failed to write elf to memory");
+
+                    last_loaded_section =
+                        std::cmp::max(hdr.p_vaddr + hdr.p_filesz, last_loaded_section);
+
+                }
                 // load the LOAD type sections
                 x => println!("not loading section of type: {x}"),
             }
         }
 
+        for shdr in elf.section_headers().unwrap() {
+            if let Ok(rels) = elf.section_data_as_relas(&shdr) {
+                for rel in rels {
+                    let sym = sym_tab.get(rel.r_sym as usize).unwrap();
+                    println!("{:#x?}", rel);
+                    // let's pretend we're libc ;)
+                    /*match rel.r_type {
+                        0x25 => {
+                            self.write_primitive_no_check(
+                                Virtaddr(rel.r_offset as usize),
+                                rel.r_addend,
+                            )
+                            .unwrap();
+                        }
+                        x => println!("unsupported relocation type {x:#x}"),
+                    }*/
+                }
+            }
+            /*if let Ok(rels) = elf.section_data_as_rels(&shdr) {
+                for rel in rels {
+                    let sym = sym_tab.get(rel.r_sym as usize).unwrap();
+                    println!("{rel:#x?}");
+                }
+            }*/
+        }
+
+        let stack_end = Virtaddr(last_loaded_section.next_multiple_of(0x1000) as usize);
+
+
         // add the stack
         self.set_permissions(
-            // add 100 bytes of padding between the program and the stack
-            Virtaddr(last_loaded_section as usize + 16),
+            stack_end,
             STACK_SIZE,
             PERM_WRITE | PERM_READ,
         )
         .expect("failed to allocate stack");
 
-        print!("stack is at: {:#x}", last_loaded_section as usize);
-        self.cur_alc = Virtaddr(last_loaded_section as usize + STACK_SIZE + 16);
-        println!("...{:#x}", self.cur_alc.0);
+        self.cur_alc = Virtaddr(stack_end.0 + 0x10 + STACK_SIZE);
 
         // get the entry point and return it to the emulator
-        (
-            elf.ehdr,
-            Virtaddr(last_loaded_section as usize + STACK_SIZE + 16),
-            exec_range,
-        )
+        (elf.ehdr, Virtaddr(stack_end.0 + STACK_SIZE), exec_range)
     }
 
     /// set the permissions specified in `perms` to a memory segment of size `size`
     /// at the the virtual address located at `addr`
     /// this function will fail if either we have an overflow by adding `size` to `addr` or
     /// `size` + `addr` is out of our memory space
-    fn set_permissions(&mut self, addr: Virtaddr, size: usize, perms: Perm) -> Result<()> {
+    pub fn set_permissions(&mut self, addr: Virtaddr, size: usize, perms: Perm) -> Result<()> {
         // nothing to do, just continue
         if size == 0 {
             return Ok(());
@@ -523,7 +614,7 @@ pub enum AccessError {
 
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Perm(u8);
+pub struct Perm(pub u8);
 
 impl Debug for Perm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -543,7 +634,9 @@ impl Debug for Perm {
         } else {
             buf.push('-');
         }
-        f.debug_tuple("Perm").field(&buf).finish()
+        f.debug_tuple("Perm")
+            .field_with(|f| f.write_str(&buf))
+            .finish()
     }
 }
 

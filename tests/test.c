@@ -1,6 +1,8 @@
 #include <unistd.h>
+#include <stdio.h>
+
 int main() {
   char  hello[] = "hello\n";
-  write(STDOUT_FILENO, hello, sizeof(hello) - 1);
+  printf(hello);
   return 0;
 }

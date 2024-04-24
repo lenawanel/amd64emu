@@ -1,6 +1,7 @@
 #![feature(portable_simd)]
 #![feature(thread_local)]
 #![feature(bigint_helper_methods)]
+#![feature(debug_closure_helpers)]
 pub mod emu;
 pub mod mmu;
 pub mod primitive;

@@ -1,21 +1,23 @@
 use core::{fmt::Debug, hint::unreachable_unchecked};
 use std::{
+    ops::Add,
     path::Path,
     simd::{
-        cmp::SimdPartialEq, i8x16, simd_swizzle, u16x8, u32x4, u32x8, u64x2, u8x16, u8x8, Mask,
-        Simd, ToBytes,
+        cmp::{SimdOrd, SimdPartialEq},
+        i8x16, simd_swizzle, u16x8, u32x4, u32x8, u64x2, u8x16, u8x8, Mask, Simd, ToBytes,
     },
+    time::Duration,
 };
 
 use elf::{endian::LittleEndian, file::FileHeader};
 // this is impossible to because of https://github.com/bitdefender/bddisasm/issues/82 ;(
 // use bddisasm::{operand::Operands, DecodedInstruction, OpInfo, Operand};
-use iced_x86::{Decoder, Formatter, Instruction, Mnemonic, NasmFormatter, OpKind};
+use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, Mnemonic, NasmFormatter, OpKind};
 
 #[cfg(debug_assertions)]
 use crate::mmu::PERM_EXEC;
 use crate::{
-    mmu::{AccessError, Virtaddr, MMU, PERM_READ},
+    mmu::{AccessError, Perm, Virtaddr, MMU, PERM_READ},
     primitive::Primitive,
 };
 #[cfg(debug_assertions)]
@@ -24,7 +26,7 @@ use std::{io::Write, ops::Range};
 pub struct Emu {
     pub memory: MMU,
     registers: [u64; 17],
-    simd_registers: [u128; 16],
+    simd_registers: [u128; 17],
     segment_registers: [u64; 2],
     #[cfg(debug_assertions)]
     pub stack_depth: usize,
@@ -99,7 +101,7 @@ impl Emu {
     pub fn load<P: AsRef<Path>>(&mut self, file: P) {
         let (ehdr, frame, exec_range) = self.memory.load(file);
         self.set_reg(ehdr.e_entry, Register::RIP);
-        self.set_reg(frame.0 as u64, Register::RSP);
+        self.set_reg(frame.0, Register::RSP);
         // self.set_reg(frame.0 as u64 - 8, Register::RBP);
 
         #[cfg(debug_assertions)]
@@ -131,13 +133,15 @@ impl Emu {
         self.push(0u64); // Argv end
         self.push(argv.0); // Argv [0]
         self.push(1u64); // Argc
+
+        println!("sp at: {:x}", self.get_reg::<usize, 8>(Register::RSP));
     }
 
     pub fn new(size: usize) -> Self {
         Self {
             memory: MMU::new(size),
             registers: [0; 17],
-            simd_registers: [0; 16],
+            simd_registers: [0; 17],
             #[cfg(debug_assertions)]
             stack_depth: 0,
             #[cfg(debug_assertions)]
@@ -171,11 +175,11 @@ impl Emu {
             // we're the high part of an register
             // so first mask off the unused bits
             self.registers
-                [register as usize - self.registers.len() - self.simd_registers.len() + 1] &=
+                [register as usize - self.registers.len() - self.simd_registers.len() + 2] &=
                 !0xff_00;
             // then set it to it's new value
             self.registers
-                [register as usize - self.registers.len() - self.simd_registers.len() + 1] |=
+                [register as usize - self.registers.len() - self.simd_registers.len() + 2] |=
                 TryInto::<u16>::try_into(val).unwrap().overflowing_shl(8).0 as u64;
         }
     }
@@ -200,7 +204,7 @@ impl Emu {
             // we're the high part of a 16 bit lower register
             T::try_from(
                 ((self.registers
-                    [register as usize - self.registers.len() - self.simd_registers.len() + 1]
+                    [register as usize - self.registers.len() - self.simd_registers.len() + 2]
                     as u16)
                     & 0xff_00)
                     >> 8,
@@ -307,10 +311,10 @@ impl Emu {
                         print!("\x1b[38;2;255;100;0m{}\x1b[0m", instr_str);
                         break 'recursive_memory_lookup;
                     }
-                    depth += 1;
-                    if depth > 5 {
-                        break 'recursive_memory_lookup;
-                    }
+                }
+                depth += 1;
+                if depth > 5 {
+                    break 'recursive_memory_lookup;
                 }
                 print!("\x1b[;96m{val:#x?}\x1b[0m");
             }
@@ -329,6 +333,7 @@ impl Emu {
         #[cfg(debug_assertions)]
         let mut call_depth = 0;
         'next_instr: loop {
+            // std::thread::sleep(Duration::from_nanos(50));
             // we have to look ahead 16 bytes into memory since that's the maximum size of x86 instructions
 
             #[cfg(debug_assertions)]
@@ -347,19 +352,23 @@ impl Emu {
             }
 
             // so we allocate a buffer for those on the stack here
-            let mut inst_buf = [0u8; 16];
+            let mut inst_buf = [0u8; 15];
             // and read them from the current instruction pointer
-            self.memory.read_to(
-                // we currently only support running this on x86 hosts
-                // so it is fine to assume that a usize has size 8 bytes here
-                Virtaddr(self.get_reg(Register::RIP)),
-                &mut inst_buf,
-            )?;
-            unsafe { IP = self.get_reg(Register::RIP) };
+            self.memory
+                .read_to(Virtaddr(self.get_reg(Register::RIP)), &mut inst_buf)?;
+            unsafe {
+                IP = self.get_reg(Register::RIP);
+                println!("{IP:#x}");
+            };
 
-            // TODO: support 32 bit mode
-            let instruction =
-                Decoder::with_ip(64, &inst_buf, self.get_reg(Register::RIP), 0).decode();
+            let instruction = Decoder::with_ip(
+                64,
+                &inst_buf,
+                self.get_reg(Register::RIP),
+                DecoderOptions::NO_INVALID_CHECK,
+            )
+            .decode();
+            self.memory.read_to(Virtaddr(0x00474694), &mut inst_buf)?;
 
             // increments a register with a usize
             macro_rules! inc_reg {
@@ -373,14 +382,6 @@ impl Emu {
                 ($exp:expr, $reg:expr) => {
                     let new_val = self.get_reg::<usize, 8>($reg) - $exp;
                     self.set_reg(new_val, $reg);
-                };
-            }
-            macro_rules! push {
-                ($expr:expr) => {
-                    let sp = self.get_reg::<usize, 8>(Register::RSP)
-                        - core::mem::size_of_val(&$expr) as usize;
-                    self.memory.write_primitive(Virtaddr(sp), $expr)?;
-                    self.set_reg(sp, Register::RSP);
                 };
             }
             macro_rules! pop {
@@ -505,7 +506,7 @@ impl Emu {
                     }
                 };
                 (s,$code:expr) => {
-                    // if SF== 1
+                    // if SF==1
                     if self.get_flag(Flag::SF) {
                         $code;
                     }
@@ -518,9 +519,11 @@ impl Emu {
                 }
             }
 
+            // dbg!(instruction.mnemonic());
+
             // set the instruction pointer to the next instruction
             inc_reg!(instruction.len(), Register::RIP);
-            // TODO: get rid of boilerplate code
+            // TODO: iced
             match instruction.mnemonic() {
                 /*
                         +-------------------------+
@@ -668,6 +671,7 @@ impl Emu {
                             )?
                         };
                     }
+
                     match bitness(instruction) {
                         Bitness::Eight => sized_shr!(i8, 1),
                         Bitness::Sixteen => sized_shr!(i16, 2),
@@ -710,14 +714,31 @@ impl Emu {
                     match_bitness_ts!(sized_shl)
                 }
                 Mnemonic::Imul => {
-                    assert!(instruction.op_count() > 1);
+                    assert!(instruction.op_count() > 2);
                     let cf = self.get_val::<u64, 8>(instruction, 2).unwrap_or(1);
+
                     macro_rules! sized_imul {
-                        ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, $typ, _, $size, $size>(instruction, |x, y| {
-                                x.wrapping_mul(y.wrapping_mul(cf as $typ))
-                            })?
-                        };
+                        ($typ:ty,$size:literal) => {{
+                            let lhs: $typ = self.get_val(instruction, 1)?;
+                            let rhs: $typ = instruction.immediate(2) as $typ;
+
+                            let (res, of) = lhs.overflowing_mul(rhs);
+
+                            self.set_val(instruction, 0, res)?;
+
+                            if of {
+                                self.set_flag(Flag::CF);
+                                self.set_flag(Flag::OF);
+                            } else {
+                                self.unset_flag(Flag::CF);
+                                self.unset_flag(Flag::OF);
+                            }
+
+                            self.unset_flag(Flag::SF);
+                            self.unset_flag(Flag::ZF);
+                            self.unset_flag(Flag::AUXCF);
+                            self.unset_flag(Flag::PF);
+                        }};
                     }
 
                     match bitness(instruction) {
@@ -725,13 +746,13 @@ impl Emu {
                         Bitness::Sixteen => sized_imul!(i16, 2),
                         Bitness::ThirtyTwo => sized_imul!(i32, 4),
                         Bitness::SixtyFour => sized_imul!(i64, 8),
-                        Bitness::HundredTwentyEigth => unsafe { unreachable_unchecked() },
+                        Bitness::HundredTwentyEigth => unsafe { unreachable!() },
                     }
                 }
                 Mnemonic::Mul => {
                     // TODO: handle 8 bit case
 
-                    macro_rules! sized_idiv {
+                    macro_rules! sized_mul {
                         ($typ:ty,$size:literal) => {{
                             let lhs: $typ = self.get_reg(Register::RAX);
                             let rhs: $typ = self.get_val(instruction, 0)?;
@@ -740,10 +761,17 @@ impl Emu {
 
                             self.set_reg::<$typ, $size>(rax, Register::RAX);
                             self.set_reg::<$typ, $size>(rdx, Register::RDX);
-                            // "CF, OF, SF, ZF, AF, and PF flags are undefined" (https://www.felixcloutier.com/x86/idiv)
 
-                            self.unset_flag(Flag::CF);
-                            self.unset_flag(Flag::OF);
+                            if rdx == 0 {
+                                self.unset_flag(Flag::CF);
+                                self.unset_flag(Flag::OF);
+                            } else {
+                                self.set_flag(Flag::CF);
+                                self.set_flag(Flag::OF);
+                            }
+
+                            // "SF, ZF, AF, and PF flags are undefined" (https://www.felixcloutier.com/x86/mul)
+
                             self.unset_flag(Flag::SF);
                             self.unset_flag(Flag::ZF);
                             self.unset_flag(Flag::AUXCF);
@@ -752,10 +780,10 @@ impl Emu {
                     }
                     match bitness(instruction) {
                         Bitness::Eight => todo!(),
-                        Bitness::Sixteen => sized_idiv!(u16, 2),
-                        Bitness::ThirtyTwo => sized_idiv!(u32, 4),
-                        Bitness::SixtyFour => sized_idiv!(u64, 8),
-                        Bitness::HundredTwentyEigth => unsafe { unreachable_unchecked() },
+                        Bitness::Sixteen => sized_mul!(u16, 2),
+                        Bitness::ThirtyTwo => sized_mul!(u32, 4),
+                        Bitness::SixtyFour => sized_mul!(u64, 8),
+                        Bitness::HundredTwentyEigth => unsafe { unreachable!() },
                     }
                 }
                 Mnemonic::Idiv => {
@@ -786,14 +814,14 @@ impl Emu {
                         Bitness::Sixteen => sized_idiv!(u16, 2, i32),
                         Bitness::ThirtyTwo => sized_idiv!(u32, 4, i64),
                         Bitness::SixtyFour => sized_idiv!(u64, 8, i128),
-                        Bitness::HundredTwentyEigth => unsafe { unreachable_unchecked() },
+                        Bitness::HundredTwentyEigth => unsafe { unreachable!() },
                     }
                 }
                 Mnemonic::Div => {
                     // div, as documented by https://www.felixcloutier.com/x86/div
                     // TODO: handle divide error
                     // TODO: handle 8 bit case
-                    macro_rules! sized_imul {
+                    macro_rules! sized_div {
                         ($typ:ty,$size:literal,$double_typ:ty) => {{
                             let lhs: $double_typ = ((self.get_reg::<$typ, $size>(Register::RDX)
                                 as $double_typ)
@@ -814,10 +842,10 @@ impl Emu {
                     }
                     match bitness(instruction) {
                         Bitness::Eight => todo!(),
-                        Bitness::Sixteen => sized_imul!(u16, 2, u32),
-                        Bitness::ThirtyTwo => sized_imul!(u32, 4, u64),
-                        Bitness::SixtyFour => sized_imul!(u64, 8, u128),
-                        Bitness::HundredTwentyEigth => unsafe { unreachable_unchecked() },
+                        Bitness::Sixteen => sized_div!(u16, 2, u32),
+                        Bitness::ThirtyTwo => sized_div!(u32, 4, u64),
+                        Bitness::SixtyFour => sized_div!(u64, 8, u128),
+                        Bitness::HundredTwentyEigth => unsafe { unreachable!() },
                     }
                 }
 
@@ -898,15 +926,17 @@ impl Emu {
                         };
                     }
 
-                    match_bitness_ts!(sized_xor)
+                    match_bitness_ts!(sized_xor);
+                    self.unset_flag(Flag::CF);
+                    self.unset_flag(Flag::OF);
                 }
                 Mnemonic::Not => {
                     macro_rules! sized_not {
                         ($typ:ty) => {{
                             let val: $typ = self.get_val(instruction, 0)?;
                             let res = !val;
+
                             self.set_val(instruction, 0, res)?;
-                            self.set_common_flags(res);
                         }};
                     }
 
@@ -917,21 +947,22 @@ impl Emu {
                         ($typ:ty) => {{
                             let val: $typ = self.get_val(instruction, 0)?;
 
-                            let res = -val;
-                            self.set_val(instruction, 0, res)?;
+                            if val == 0 {
+                                self.unset_flag(Flag::CF)
+                            } else {
+                                self.set_flag(Flag::CF)
+                            }
+
+                            let res = (!val).wrapping_add(1);
                             self.set_common_flags(res);
+
+                            self.set_val(instruction, 0, res)?;
                         }};
                     }
 
-                    match bitness(instruction) {
-                        Bitness::Eight => sized_neg!(i8),
-                        Bitness::Sixteen => sized_neg!(i16),
-                        Bitness::ThirtyTwo => sized_neg!(i32),
-                        Bitness::SixtyFour => sized_neg!(i64),
-                        Bitness::HundredTwentyEigth => sized_neg!(i128),
-                    }
+                    match_bitness_typ!(sized_neg)
                 }
-                Mnemonic::Or => {
+                Mnemonic::Or | Mnemonic::Por => {
                     // or, as documented by https://www.felixcloutier.com/x86/or
                     macro_rules! sized_or {
                         ($typ:ty,$size:literal) => {
@@ -949,38 +980,44 @@ impl Emu {
                     self.set_reg(rdx, Register::RDX);
                 }
                 Mnemonic::Cdqe => {
-                    let val = self.get_reg::<u32, 4>(Register::RAX) as i32 as i64;
+                    let val = self.get_reg::<i32, 4>(Register::RAX) as i64;
                     self.set_reg(val, Register::RAX);
                 }
 
                 Mnemonic::Rol => {
-                    // shr, as documented by https://www.felixcloutier.com/x86/sal:sar:shl:shr
+                    // rol https://www.felixcloutier.com/x86/rcl:rcr:rol:ror
 
-                    macro_rules! sized_shr {
+                    macro_rules! sized_rol {
                         ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, u32, _, $size, 4>(
-                                instruction,
-                                <$typ>::rotate_left,
-                            )?
+                            self.do_loar_op::<$typ, u32, _, $size, 4>(instruction, |lhs, rhs| {
+                                if $size == 8 {
+                                    lhs.rotate_left(rhs & 0b111111)
+                                } else {
+                                    lhs.rotate_left(rhs & 0b11111)
+                                }
+                            })?
                         };
                     }
 
-                    match_bitness_ts!(sized_shr)
+                    match_bitness_ts!(sized_rol)
                 }
 
                 Mnemonic::Ror => {
-                    // shr, as documented by https://www.felixcloutier.com/x86/sal:sar:shl:shr
+                    // ror https://www.felixcloutier.com/x86/rcl:rcr:rol:ror
 
-                    macro_rules! sized_shr {
+                    macro_rules! sized_ror {
                         ($typ:ty,$size:literal) => {
-                            self.do_loar_op::<$typ, u32, _, $size, 4>(
-                                instruction,
-                                <$typ>::rotate_right,
-                            )?
+                            self.do_loar_op::<$typ, u32, _, $size, 4>(instruction, |lhs, rhs| {
+                                if $size == 8 {
+                                    lhs.rotate_right(rhs & 0b111111)
+                                } else {
+                                    lhs.rotate_right(rhs & 0b11111)
+                                }
+                            })?
                         };
                     }
 
-                    match_bitness_ts!(sized_shr)
+                    match_bitness_ts!(sized_ror)
                 }
 
                 /*
@@ -992,6 +1029,8 @@ impl Emu {
                 Mnemonic::Call => {
                     // call as documented by https://www.felixcloutier.com/x86/call
                     // get the new ip
+                    // println!("sp at: {:x}", self.get_reg::<usize, 8>(Register::RSP));
+
                     let new_ip: usize = self.get_val::<usize, 8>(instruction, 0)?;
                     #[cfg(debug_assertions)]
                     {
@@ -1005,14 +1044,20 @@ impl Emu {
                         );
                     }
                     // push our old ip onto the stack
-                    push!(self.get_reg::<usize, 8>(Register::RIP));
+                    self.push(self.get_reg::<usize, 8>(Register::RIP));
                     // set rip to the new ip and continue execution there
                     self.set_reg(new_ip, Register::RIP);
                     continue 'next_instr;
                 }
                 Mnemonic::Ret => {
+                    // println!("sp at: {:x}", self.get_reg::<usize, 8>(Register::RSP));
                     // get the new ip
-                    let new_ip: u64 = pop!(8);
+                    let new_ip: u64 = {
+                        let sp: usize = self.get_reg::<usize, 8>(Register::RSP);
+                        self.set_reg(sp + 8 as usize, Register::RSP);
+                        self.memory.read_primitive(Virtaddr(sp))?
+                    };
+                    println!("new IP: {new_ip:#x}");
                     #[cfg(debug_assertions)]
                     {
                         // println!("{:\t<1$}ret to: {new_ip:#x}", "", call_depth);
@@ -1199,7 +1244,7 @@ impl Emu {
                                 let reg = reg_from_iced_reg(op1).unwrap();
                                 let reg_val: $typ = self.get_reg(reg);
                                 self.set_val(instruction, 0, reg_val).unwrap();
-                                self.set_reg(op0, reg);
+                                // self.set_reg(op0, reg);
                                 self.set_flag(Flag::ZF);
                             } else {
                                 self.set_reg(op0, Register::RAX);
@@ -1224,14 +1269,14 @@ impl Emu {
                     // movsxd, as documented by https://www.felixcloutier.com/x86/movsx:movsxd
                     // let's hope that this sign extends
                     match bitness(instruction) {
-                        Bitness::Eight => unsafe { unreachable_unchecked() },
+                        Bitness::Eight => unsafe { unreachable!() },
                         Bitness::Sixteen => sized_mov!(i16),
                         Bitness::ThirtyTwo => sized_mov!(i32),
                         Bitness::SixtyFour => {
                             let val: i32 = self.get_val(instruction, 1)?;
                             self.set_val(instruction, 0, val as i64)?;
                         }
-                        Bitness::HundredTwentyEigth => unsafe { unreachable_unchecked() },
+                        Bitness::HundredTwentyEigth => unsafe { unreachable!() },
                     }
                 }
                 Mnemonic::Movzx => {
@@ -1255,14 +1300,17 @@ impl Emu {
                     macro_rules! push_sized {
                         ($typ:ty) => {{
                             let val: $typ = self.get_val(instruction, 0)?;
-                            push!(val);
+                            self.push(val);
                         }};
                     }
 
                     match_bitness_typ!(push_sized)
                 }
                 Mnemonic::Pushfq => {
-                    push!(self.rflags);
+                    self.push(self.rflags);
+                }
+                Mnemonic::Rdsspq => {
+                    self.set_val(instruction, 0, self.get_reg::<u64, 8>(Register::RSP))?;
                 }
                 /*
                         +-----------------------------+
@@ -1272,29 +1320,35 @@ impl Emu {
                 Mnemonic::Cpuid => {
                     // pretend we're and old intel cpu
                     // https://de.wikipedia.org/wiki/CPUID
+                    // dbg!();
                     let ax = self.get_reg::<u8, 1>(Register::RAX);
                     if ax == 0 {
                         unsafe {
                             self.set_reg(
-                                std::mem::transmute::<[u8; 4], u32>(*b"letn"),
+                                std::mem::transmute::<[u8; 4], u32>(*b"DMAc"),
                                 Register::RBX,
                             );
                         }
                         unsafe {
                             self.set_reg(
-                                std::mem::transmute::<[u8; 4], u32>(*b"Ieni"),
+                                std::mem::transmute::<[u8; 4], u32>(*b"itne"),
                                 Register::RDX,
                             );
                         }
                         unsafe {
                             self.set_reg(
-                                std::mem::transmute::<[u8; 4], u32>(*b"uneG"),
+                                std::mem::transmute::<[u8; 4], u32>(*b"htuA"),
                                 Register::RCX,
                             );
                         }
+                    } else if ax == 1 {
+                        self.set_reg(0, Register::RCX);
+                        self.set_reg(
+                            (1 << 26) | (1 << 25) | (1 << 15) | (1 << 11) | (1 << 29),
+                            Register::RDX,
+                        );
                     } else {
-                        // since it's easy to find, let's pretend we're a celeron m
-                        self.set_reg(0x06EC, Register::RCX);
+                        todo!()
                     }
                 }
                 Mnemonic::Endbr64 => {
@@ -1343,10 +1397,13 @@ impl Emu {
                     }
                 }
                 Mnemonic::Sete => {
-                    self.set_val(instruction, 0, self.get_flag(Flag::ZF) as u8)?;
+                    self.set_val(instruction, 0, (self.get_flag(Flag::ZF) as u8) * 0xffu8)?;
                 }
                 Mnemonic::Setne => {
-                    self.set_val(instruction, 0, !self.get_flag(Flag::ZF) as u8)?;
+                    self.set_val(instruction, 0, (!self.get_flag(Flag::ZF) as u8) * 0xffu8)?;
+                }
+                Mnemonic::Seto => {
+                    self.set_val(instruction, 0, (self.get_flag(Flag::OF) as u8) * 0xffu8)?;
                 }
                 /*
                         +----------------------+
@@ -1361,11 +1418,7 @@ impl Emu {
 
                     let val: u128 = unsafe { core::mem::transmute(lhs.interleave(rhs).0) };
 
-                    if bitness(instruction) == Bitness::HundredTwentyEigth {
-                        self.set_val(instruction, 0, val)?;
-                    } else {
-                        self.set_val(instruction, 0, val as u64)?;
-                    }
+                    self.set_val(instruction, 0, val)?;
                 }
                 Mnemonic::Punpcklqdq => {
                     let lhs: u64x2 =
@@ -1375,11 +1428,7 @@ impl Emu {
 
                     let val: u128 = unsafe { core::mem::transmute(lhs.interleave(rhs).0) };
 
-                    if bitness(instruction) == Bitness::HundredTwentyEigth {
-                        self.set_val(instruction, 0, val)?;
-                    } else {
-                        self.set_val(instruction, 0, val as u64)?;
-                    }
+                    self.set_val(instruction, 0, val)?;
                 }
                 Mnemonic::Punpcklbw => {
                     let lhs: u8x16 =
@@ -1389,11 +1438,7 @@ impl Emu {
 
                     let val: u128 = unsafe { core::mem::transmute(lhs.interleave(rhs).0) };
 
-                    if bitness(instruction) == Bitness::HundredTwentyEigth {
-                        self.set_val(instruction, 0, val)?;
-                    } else {
-                        self.set_val(instruction, 0, val as u64)?;
-                    }
+                    self.set_val(instruction, 0, val)?;
                 }
                 Mnemonic::Punpcklwd => {
                     let lhs: u16x8 =
@@ -1403,64 +1448,15 @@ impl Emu {
 
                     let val: u128 = unsafe { core::mem::transmute(lhs.interleave(rhs).0) };
 
-                    if bitness(instruction) == Bitness::HundredTwentyEigth {
-                        self.set_val(instruction, 0, val)?;
-                    } else {
-                        self.set_val(instruction, 0, val as u64)?;
-                    }
+                    self.set_val(instruction, 0, val)?;
                 }
-                Mnemonic::Pxor => {
-                    self.do_loar_op::<u128, u128, _, 16, 16>(
-                        instruction,
-                        core::ops::BitXor::bitxor,
-                    )
-                    .unwrap();
-                }
-                Mnemonic::Pcmpeqb => {
-                    let lhs: u8x16 =
-                        u8x16::from_array(self.get_val::<u128, 16>(instruction, 0)?.to_ne_bytes());
-                    let rhs: u8x16 =
-                        u8x16::from_array(self.get_val::<u128, 16>(instruction, 1)?.to_ne_bytes());
-
-                    let val: u128 = unsafe { core::mem::transmute(lhs.simd_eq(rhs).to_int()) };
-
-                    if bitness(instruction) == Bitness::HundredTwentyEigth {
-                        self.set_val(instruction, 0, val)?;
-                    } else {
-                        self.set_val(instruction, 0, val as u64)?;
-                    }
-                }
-                Mnemonic::Pcmpeqd => {
-                    let lhs: u32x4 =
-                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 0)?) };
-                    let rhs =
-                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 1)?) };
-
-                    let val: u128 = unsafe { core::mem::transmute(lhs.simd_eq(rhs).to_int()) };
-
-                    if bitness(instruction) == Bitness::HundredTwentyEigth {
-                        self.set_val(instruction, 0, val)?;
-                    } else {
-                        self.set_val(instruction, 0, val as u64)?;
-                    }
-                }
-                Mnemonic::Pmovmskb => {
-                    let int: i8x16 =
-                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 1)?) };
-                    let mask: u64 = unsafe { Mask::from_int_unchecked(int).to_bitmask() };
-                    self.set_val(instruction, 0, mask)?;
-                }
-                Mnemonic::Movhps => match instruction.op0_kind() {
-                    OpKind::Register => {
-                        let val: u64 = self.get_val(instruction, 0)?;
-                        self.set_val(instruction, 1, (val as u128) << 64)?;
-                    }
-                    OpKind::Memory => todo!(),
-                    _ => unsafe { unreachable_unchecked() },
-                },
                 Mnemonic::Movaps | Mnemonic::Movdqa | Mnemonic::Movups | Mnemonic::Movdqu => {
                     let val: u128 = self.get_val(instruction, 1)?;
                     self.set_val(instruction, 0, val).unwrap();
+                }
+                Mnemonic::Movhps => {
+                    let src: u128 = self.get_val(instruction, 1)?;
+                    self.set_val(instruction, 1, (src >> 64) as u64)?;
                 }
                 Mnemonic::Pshufd => {
                     let imm = instruction.immediate8();
@@ -1491,7 +1487,49 @@ impl Emu {
 
                     self.set_val(instruction, 0, shuf)?;
                 }
+                Mnemonic::Pxor => {
+                    self.do_loar_op::<u128, u128, _, 16, 16>(
+                        instruction,
+                        core::ops::BitXor::bitxor,
+                    )
+                    .unwrap();
+                }
+                Mnemonic::Pcmpeqb => {
+                    let lhs: u8x16 =
+                        u8x16::from_array(self.get_val::<u128, 16>(instruction, 0)?.to_ne_bytes());
+                    let rhs: u8x16 =
+                        u8x16::from_array(self.get_val::<u128, 16>(instruction, 1)?.to_ne_bytes());
 
+                    let val: u128 = unsafe { core::mem::transmute(lhs.simd_eq(rhs).to_int()) };
+
+                    self.set_val(instruction, 0, val)?;
+                }
+                Mnemonic::Pcmpeqd => {
+                    let lhs: u32x4 =
+                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 0)?) };
+                    let rhs =
+                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 1)?) };
+
+                    let val: u128 = unsafe { core::mem::transmute(lhs.simd_eq(rhs).to_int()) };
+
+                    self.set_val(instruction, 0, val)?;
+                }
+                Mnemonic::Pmovmskb => {
+                    let int: i8x16 =
+                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 1)?) };
+                    let mask: u64 = unsafe { Mask::from_int_unchecked(int).to_bitmask() };
+                    self.set_val(instruction, 0, mask)?;
+                }
+                Mnemonic::Pminub => {
+                    let lhs: u8x16 =
+                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 0)?) };
+                    let rhs =
+                        unsafe { core::mem::transmute(self.get_val::<u128, 16>(instruction, 1)?) };
+
+                    let val: u128 = unsafe { core::mem::transmute(lhs.simd_min(rhs)) };
+
+                    self.set_val(instruction, 0, val)?;
+                }
                 /*
                         +---------------------------------+
                         | Kernel interfacing Instructions |
@@ -1500,7 +1538,12 @@ impl Emu {
                 Mnemonic::Syscall => {
                     self.handle_syscall(self.get_reg(Register::RAX))?;
                 }
-                x => unsafe { todo!("unsupported opcode: {x:?} at IP {IP:#x}") },
+                x => unsafe {
+                    todo!(
+                        "unsupported opcode: {x:?} at IP {IP:#x} and SP {:#x}",
+                        self.get_reg::<usize, 8>(Register::RSP)
+                    )
+                },
             };
         }
     }
@@ -1549,7 +1592,19 @@ impl Emu {
             }
             // mprotect
             10 => {
-                // TODO: actually do the work here
+                let start = Virtaddr(self.get_reg(Register::RDI));
+                let len: usize = self.get_reg(Register::RSI);
+                let prot: u8 = self.get_reg(Register::RDX);
+                let read = (prot & 0x1) << 2;
+                let write = prot & 0x2;
+                let exec = (prot & 0x4) >> 2;
+
+                let perms = Perm(read | write | exec);
+
+                // panic!("{perms:?}");
+
+                self.memory.set_permissions(start, len, perms)?;
+
                 self.set_reg(0u64, Register::RAX);
             }
             // brk
@@ -1592,7 +1647,9 @@ impl Emu {
                     }
                     // ARCH_SET_FS
                     0x1002 => {
-                        self.set_seg(SegReg::Fs, self.get_reg(Register::RSI));
+                        let addr = self.get_reg(Register::RSI);
+                        self.set_seg(SegReg::Fs, addr);
+                        self.memory.write_primitive(Virtaddr(addr as usize), addr)?;
                         // we were succesful
                         self.set_reg(0u64, Register::RAX)
                     }
@@ -1832,7 +1889,7 @@ impl Emu {
                 let address: usize = self.calc_addr(instruction);
                 Ok(self.memory.write_primitive(Virtaddr(address), val)?)
             }
-            _ => unsafe { unreachable_unchecked() },
+            _ => unsafe { unreachable!() },
         }
     }
 
@@ -1860,7 +1917,7 @@ impl Emu {
                 addr = addr.wrapping_add(scale * self.get_reg::<usize, 8>(index_reg));
             }
 
-            // check if we are indexin a segment register
+            // check if we are indexing a segment register
             // if so, add it to the addres
             // example:
             // ```x86asm
@@ -1901,7 +1958,7 @@ impl Emu {
         if let Ok(inst_buf) = self.memory.peek(
             Virtaddr(self.get_reg::<usize, 8>(Register::RIP)),
             16,
-            PERM_EXEC,
+            Perm(0),
         ) {
             let decoder = Decoder::with_ip(64, inst_buf, self.get_reg(Register::RIP), 0);
             let mut formatter = NasmFormatter::new();
@@ -2139,6 +2196,7 @@ fn reg_from_iced_reg(reg: iced_x86::Register) -> Option<Register> {
         Register::RSP => Some(RSP),
         Register::RBP => Some(RBP),
         Register::EBP => Some(RBP),
+        Register::BH => Some(BH),
         Register::RSI => Some(RSI),
         Register::ESI => Some(RSI),
         Register::SIL => Some(RSI),
@@ -2154,8 +2212,10 @@ fn reg_from_iced_reg(reg: iced_x86::Register) -> Option<Register> {
         Register::R10L => Some(R10),
         Register::R11 => Some(R11),
         Register::R11D => Some(R11),
+        Register::R11L => Some(R11),
         Register::R12 => Some(R12),
         Register::R12D => Some(R12),
+        Register::R12L => Some(R12),
         Register::R13 => Some(R13),
         Register::R13D => Some(R13),
         Register::R14 => Some(R14),
@@ -2163,6 +2223,7 @@ fn reg_from_iced_reg(reg: iced_x86::Register) -> Option<Register> {
         Register::R14D => Some(R14),
         Register::R15 => Some(R15),
         Register::R15D => Some(R15),
+        Register::R15L => Some(R15),
         Register::EIP => Some(RIP),
         Register::RIP => Some(RIP),
         Register::XMM0 => Some(Xmm0),
@@ -2170,6 +2231,8 @@ fn reg_from_iced_reg(reg: iced_x86::Register) -> Option<Register> {
         Register::XMM2 => Some(Xmm2),
         Register::XMM3 => Some(Xmm3),
         Register::XMM4 => Some(Xmm4),
+        Register::XMM5 => Some(Xmm5),
+        Register::XMM6 => Some(Xmm6),
         x => todo!("implement register {x:?}"),
     }
 }
@@ -2177,7 +2240,9 @@ fn reg_from_iced_reg(reg: iced_x86::Register) -> Option<Register> {
 fn seg_from_iced_seg(reg: iced_x86::Register) -> Option<SegReg> {
     match reg {
         iced_x86::Register::FS => Some(SegReg::Fs),
-        _ => None,
+        iced_x86::Register::SS => None,
+        iced_x86::Register::DS => None,
+        x => todo!("{x:?} at {:#x}", unsafe { IP }),
     }
 }
 
@@ -2222,6 +2287,7 @@ fn reg_bitness(reg: iced_x86::Register) -> Bitness {
         | iced_x86::Register::R14D
         | iced_x86::Register::R15D => Bitness::ThirtyTwo,
         iced_x86::Register::AL
+        | iced_x86::Register::R11L
         | iced_x86::Register::R14L
         | iced_x86::Register::CL
         | iced_x86::Register::DL
@@ -2273,7 +2339,8 @@ fn reg_bitness(reg: iced_x86::Register) -> Bitness {
         | iced_x86::Register::XMM1
         | iced_x86::Register::XMM2
         | iced_x86::Register::XMM3
-        | iced_x86::Register::XMM4 => Bitness::HundredTwentyEigth,
+        | iced_x86::Register::XMM4
+        | iced_x86::Register::XMM5 => Bitness::HundredTwentyEigth,
 
         x => todo!("{x:?}"),
     }
