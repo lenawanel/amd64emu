@@ -1,12 +1,10 @@
-use core::{fmt::Debug, hint::unreachable_unchecked};
+use core::fmt::Debug;
 use std::{
-    ops::Add,
     path::Path,
     simd::{
         cmp::{SimdOrd, SimdPartialEq},
-        i8x16, simd_swizzle, u16x8, u32x4, u32x8, u64x2, u8x16, u8x8, Mask, Simd, ToBytes,
+        i8x16, simd_swizzle, u16x8, u32x4, u64x2, u8x16, u8x8, Mask, Simd,
     },
-    time::Duration,
 };
 
 use elf::{endian::LittleEndian, file::FileHeader};
@@ -393,7 +391,7 @@ impl Emu {
             }
             macro_rules! match_bitness_ts {
                 ($id:ident) => {
-                    match bitness(instruction) {
+                    match bitness(instruction, 0) {
                         Bitness::Eight => $id!(u8, 1),
                         Bitness::Sixteen => $id!(u16, 2),
                         Bitness::ThirtyTwo => $id!(u32, 4),
@@ -404,7 +402,7 @@ impl Emu {
             }
             macro_rules! match_bitness_typ {
                 ($id:ident) => {
-                    match bitness(instruction) {
+                    match bitness(instruction, 0) {
                         Bitness::Eight => $id!(u8),
                         Bitness::Sixteen => $id!(u16),
                         Bitness::ThirtyTwo => $id!(u32),
@@ -431,7 +429,7 @@ impl Emu {
                     let new_ip: u64 = self.get_val::<u64, 8>(instruction, 0)?;
                     self.set_reg(new_ip, Register::RIP);
                     // and jump to it
-                    continue 'next_instr;
+                    //                    continue 'next_instr;
                 }};
             }
 
@@ -552,9 +550,9 @@ impl Emu {
                                 }
 
                                 if (lhs & 0xf) + (rhs & 0xf) > 0xf {
-                                    emu.set_flag(Flag::AUXCF)
+                                    emu.set_flag(Flag::AuxCF)
                                 } else {
-                                    emu.unset_flag(Flag::AUXCF)
+                                    emu.unset_flag(Flag::AuxCF)
                                 }
                             };
                             self.do_arith_op::<$typ, $typ, _, _, $size, $size>(
@@ -589,9 +587,9 @@ impl Emu {
                                 }
 
                                 if (lhs & 0xf) < (rhs & 0xf) {
-                                    emu.set_flag(Flag::AUXCF)
+                                    emu.set_flag(Flag::AuxCF)
                                 } else {
-                                    emu.unset_flag(Flag::AUXCF)
+                                    emu.unset_flag(Flag::AuxCF)
                                 }
                             };
                             self.do_arith_op::<$typ, $typ, _, _, $size, $size>(
@@ -628,9 +626,9 @@ impl Emu {
                                 }
 
                                 if (lhs & 0xf) < (rhs & 0xf) {
-                                    emu.set_flag(Flag::AUXCF)
+                                    emu.set_flag(Flag::AuxCF)
                                 } else {
-                                    emu.unset_flag(Flag::AUXCF)
+                                    emu.unset_flag(Flag::AuxCF)
                                 }
                             };
                             self.do_arith_op::<$typ, $typ, _, _, $size, $size>(
@@ -672,7 +670,7 @@ impl Emu {
                         };
                     }
 
-                    match bitness(instruction) {
+                    match bitness(instruction, 0) {
                         Bitness::Eight => sized_shr!(i8, 1),
                         Bitness::Sixteen => sized_shr!(i16, 2),
                         Bitness::ThirtyTwo => sized_shr!(i32, 4),
@@ -715,12 +713,19 @@ impl Emu {
                 }
                 Mnemonic::Imul => {
                     assert!(instruction.op_count() > 2);
-                    let cf = self.get_val::<u64, 8>(instruction, 2).unwrap_or(1);
+
+                    // instruction.immediate(operand)
 
                     macro_rules! sized_imul {
                         ($typ:ty,$size:literal) => {{
                             let lhs: $typ = self.get_val(instruction, 1)?;
-                            let rhs: $typ = instruction.immediate(2) as $typ;
+                            let rhs: $typ = match bitness(instruction, 2) {
+                                Bitness::Eight => instruction.immediate(2) as i8 as $typ,
+                                Bitness::Sixteen => instruction.immediate(2) as i16 as $typ,
+                                Bitness::ThirtyTwo => instruction.immediate(2) as i32 as $typ,
+                                Bitness::SixtyFour => instruction.immediate(2) as i64 as $typ,
+                                x => unreachable!("{instruction}, bitness: {x:?}"),
+                            };
 
                             let (res, of) = lhs.overflowing_mul(rhs);
 
@@ -736,17 +741,17 @@ impl Emu {
 
                             self.unset_flag(Flag::SF);
                             self.unset_flag(Flag::ZF);
-                            self.unset_flag(Flag::AUXCF);
+                            self.unset_flag(Flag::AuxCF);
                             self.unset_flag(Flag::PF);
                         }};
                     }
 
-                    match bitness(instruction) {
+                    match bitness(instruction, 0) {
                         Bitness::Eight => todo!(),
                         Bitness::Sixteen => sized_imul!(i16, 2),
                         Bitness::ThirtyTwo => sized_imul!(i32, 4),
                         Bitness::SixtyFour => sized_imul!(i64, 8),
-                        Bitness::HundredTwentyEigth => unsafe { unreachable!() },
+                        Bitness::HundredTwentyEigth => unreachable!("{instruction}"),
                     }
                 }
                 Mnemonic::Mul => {
@@ -774,16 +779,16 @@ impl Emu {
 
                             self.unset_flag(Flag::SF);
                             self.unset_flag(Flag::ZF);
-                            self.unset_flag(Flag::AUXCF);
+                            self.unset_flag(Flag::AuxCF);
                             self.unset_flag(Flag::PF);
                         }};
                     }
-                    match bitness(instruction) {
+                    match bitness(instruction, 0) {
                         Bitness::Eight => todo!(),
                         Bitness::Sixteen => sized_mul!(u16, 2),
                         Bitness::ThirtyTwo => sized_mul!(u32, 4),
                         Bitness::SixtyFour => sized_mul!(u64, 8),
-                        Bitness::HundredTwentyEigth => unsafe { unreachable!() },
+                        Bitness::HundredTwentyEigth => unreachable!(),
                     }
                 }
                 Mnemonic::Idiv => {
@@ -805,16 +810,16 @@ impl Emu {
                             self.unset_flag(Flag::OF);
                             self.unset_flag(Flag::SF);
                             self.unset_flag(Flag::ZF);
-                            self.unset_flag(Flag::AUXCF);
+                            self.unset_flag(Flag::AuxCF);
                             self.unset_flag(Flag::PF);
                         }};
                     }
-                    match bitness(instruction) {
+                    match bitness(instruction, 0) {
                         Bitness::Eight => todo!(),
-                        Bitness::Sixteen => sized_idiv!(u16, 2, i32),
-                        Bitness::ThirtyTwo => sized_idiv!(u32, 4, i64),
-                        Bitness::SixtyFour => sized_idiv!(u64, 8, i128),
-                        Bitness::HundredTwentyEigth => unsafe { unreachable!() },
+                        Bitness::Sixteen => sized_idiv!(i16, 2, i32),
+                        Bitness::ThirtyTwo => sized_idiv!(i32, 4, i64),
+                        Bitness::SixtyFour => sized_idiv!(i64, 8, i128),
+                        Bitness::HundredTwentyEigth => unreachable!(),
                     }
                 }
                 Mnemonic::Div => {
@@ -836,16 +841,16 @@ impl Emu {
                             self.unset_flag(Flag::OF);
                             self.unset_flag(Flag::SF);
                             self.unset_flag(Flag::ZF);
-                            self.unset_flag(Flag::AUXCF);
+                            self.unset_flag(Flag::AuxCF);
                             self.unset_flag(Flag::PF);
                         }};
                     }
-                    match bitness(instruction) {
+                    match bitness(instruction, 0) {
                         Bitness::Eight => todo!(),
                         Bitness::Sixteen => sized_div!(u16, 2, u32),
                         Bitness::ThirtyTwo => sized_div!(u32, 4, u64),
                         Bitness::SixtyFour => sized_div!(u64, 8, u128),
-                        Bitness::HundredTwentyEigth => unsafe { unreachable!() },
+                        Bitness::HundredTwentyEigth => unreachable!(),
                     }
                 }
 
@@ -854,7 +859,7 @@ impl Emu {
                         | Logical Instructions |
                         +----------------------+
                 */
-                Mnemonic::And | Mnemonic::Pand => {
+                Mnemonic::And => {
                     // as documented by https://www.felixcloutier.com/x86/and
                     macro_rules! sized_and {
                         ($typ:ty,$size:literal) => {
@@ -877,7 +882,7 @@ impl Emu {
                             self.unset_flag(Flag::CF);
                             self.unset_flag(Flag::OF);
                             self.unset_flag(Flag::SF);
-                            self.unset_flag(Flag::AUXCF);
+                            self.unset_flag(Flag::AuxCF);
                             self.unset_flag(Flag::PF);
 
                             if source == 0 {
@@ -901,7 +906,7 @@ impl Emu {
                             self.unset_flag(Flag::CF);
                             self.unset_flag(Flag::OF);
                             self.unset_flag(Flag::SF);
-                            self.unset_flag(Flag::AUXCF);
+                            self.unset_flag(Flag::AuxCF);
                             self.unset_flag(Flag::PF);
 
                             if source == 0 {
@@ -962,7 +967,7 @@ impl Emu {
 
                     match_bitness_typ!(sized_neg)
                 }
-                Mnemonic::Or | Mnemonic::Por => {
+                Mnemonic::Or => {
                     // or, as documented by https://www.felixcloutier.com/x86/or
                     macro_rules! sized_or {
                         ($typ:ty,$size:literal) => {
@@ -1029,7 +1034,6 @@ impl Emu {
                 Mnemonic::Call => {
                     // call as documented by https://www.felixcloutier.com/x86/call
                     // get the new ip
-                    // println!("sp at: {:x}", self.get_reg::<usize, 8>(Register::RSP));
 
                     let new_ip: usize = self.get_val::<usize, 8>(instruction, 0)?;
                     #[cfg(debug_assertions)]
@@ -1044,23 +1048,20 @@ impl Emu {
                         );
                     }
                     // push our old ip onto the stack
-                    self.push(self.get_reg::<usize, 8>(Register::RIP));
+                    self.push(self.get_reg::<u64, 8>(Register::RIP));
                     // set rip to the new ip and continue execution there
                     self.set_reg(new_ip, Register::RIP);
-                    continue 'next_instr;
                 }
                 Mnemonic::Ret => {
-                    // println!("sp at: {:x}", self.get_reg::<usize, 8>(Register::RSP));
                     // get the new ip
                     let new_ip: u64 = {
                         let sp: usize = self.get_reg::<usize, 8>(Register::RSP);
-                        self.set_reg(sp + 8 as usize, Register::RSP);
+                        self.set_reg(sp + 8usize, Register::RSP);
                         self.memory.read_primitive(Virtaddr(sp))?
                     };
                     println!("new IP: {new_ip:#x}");
                     #[cfg(debug_assertions)]
                     {
-                        // println!("{:\t<1$}ret to: {new_ip:#x}", "", call_depth);
                         println!(
                             "{:\t<1$}⮡ {rax:#x}",
                             "",
@@ -1070,7 +1071,6 @@ impl Emu {
                         call_depth -= 1;
                     }
                     self.set_reg(new_ip, Register::RIP);
-                    continue 'next_instr;
                 }
 
                 // | jump instructions |
@@ -1158,9 +1158,9 @@ impl Emu {
                             }
 
                             if (lhs & 0xf) < (rhs & 0xf) {
-                                self.set_flag(Flag::AUXCF)
+                                self.set_flag(Flag::AuxCF)
                             } else {
-                                self.unset_flag(Flag::AUXCF)
+                                self.unset_flag(Flag::AuxCF)
                             }
                             self.set_common_flags(res);
                         }};
@@ -1172,7 +1172,7 @@ impl Emu {
                     let lhs: u64 = self.get_val(instruction, 0)?;
                     let rhs: u64 = self.get_val(instruction, 1)?;
                     let and_res: u64 = lhs & rhs;
-                    let bitness = bitness(instruction);
+                    let bitness = bitness(instruction, 0);
                     if (and_res & (1 << (bitness as u64 - 1))) > 0 {
                         self.set_flag(Flag::SF)
                     } else {
@@ -1267,21 +1267,98 @@ impl Emu {
                 }
                 Mnemonic::Movsxd => {
                     // movsxd, as documented by https://www.felixcloutier.com/x86/movsx:movsxd
-                    // let's hope that this sign extends
-                    match bitness(instruction) {
-                        Bitness::Eight => unsafe { unreachable!() },
-                        Bitness::Sixteen => sized_mov!(i16),
-                        Bitness::ThirtyTwo => sized_mov!(i32),
-                        Bitness::SixtyFour => {
-                            let val: i32 = self.get_val(instruction, 1)?;
-                            self.set_val(instruction, 0, val as i64)?;
-                        }
-                        Bitness::HundredTwentyEigth => unsafe { unreachable!() },
+
+                    match bitness(instruction, 0) {
+                        Bitness::Eight => unreachable!(),
+                        Bitness::Sixteen => match bitness(instruction, 1) {
+                            Bitness::Eight => {
+                                let val: i8 = self.get_val(instruction, 1)?;
+                                self.set_val(instruction, 0, val as i16)?;
+                            }
+                            Bitness::Sixteen => {
+                                let val: i16 = self.get_val(instruction, 1)?;
+                                self.set_val(instruction, 0, val as i16)?;
+                            }
+                            _ => unreachable!(),
+                        },
+                        Bitness::ThirtyTwo => match bitness(instruction, 1) {
+                            Bitness::Eight => {
+                                let val: i8 = self.get_val(instruction, 1)?;
+                                self.set_val(instruction, 0, val as i32)?;
+                            }
+                            Bitness::Sixteen => {
+                                let val: i16 = self.get_val(instruction, 1)?;
+                                self.set_val(instruction, 0, val as i32)?;
+                            }
+                            Bitness::ThirtyTwo => {
+                                let val: i32 = self.get_val(instruction, 1)?;
+                                self.set_val(instruction, 0, val as i32)?;
+                            }
+                            _ => unreachable!(),
+                        },
+                        Bitness::SixtyFour => match bitness(instruction, 1) {
+                            Bitness::Eight => {
+                                let val: i8 = self.get_val(instruction, 1)?;
+                                self.set_val(instruction, 0, val as i64)?;
+                            }
+                            Bitness::Sixteen => {
+                                let val: i16 = self.get_val(instruction, 1)?;
+                                self.set_val(instruction, 0, val as i64)?;
+                            }
+                            Bitness::ThirtyTwo => {
+                                let val: i32 = self.get_val(instruction, 1)?;
+                                self.set_val(instruction, 0, val as i64)?;
+                            }
+                            x => unreachable!("{instruction}, bittnes: {x:?}"),
+                        },
+                        Bitness::HundredTwentyEigth => unreachable!(),
                     }
                 }
-                Mnemonic::Movzx => {
-                    match_bitness_typ!(sized_mov)
-                }
+                Mnemonic::Movzx => match bitness(instruction, 0) {
+                    Bitness::Eight => unreachable!(),
+                    Bitness::Sixteen => match bitness(instruction, 1) {
+                        Bitness::Eight => {
+                            let val: u8 = self.get_val(instruction, 1)?;
+                            self.set_val(instruction, 0, val as u16)?;
+                        }
+                        Bitness::Sixteen => {
+                            let val: u16 = self.get_val(instruction, 1)?;
+                            self.set_val(instruction, 0, val as u16)?;
+                        }
+                        _ => unreachable!(),
+                    },
+                    Bitness::ThirtyTwo => match bitness(instruction, 1) {
+                        Bitness::Eight => {
+                            let val: u8 = self.get_val(instruction, 1)?;
+                            self.set_val(instruction, 0, val as u32)?;
+                        }
+                        Bitness::Sixteen => {
+                            let val: u16 = self.get_val(instruction, 1)?;
+                            self.set_val(instruction, 0, val as u32)?;
+                        }
+                        Bitness::ThirtyTwo => {
+                            let val: u32 = self.get_val(instruction, 1)?;
+                            self.set_val(instruction, 0, val as u32)?;
+                        }
+                        _ => unreachable!(),
+                    },
+                    Bitness::SixtyFour => match bitness(instruction, 1) {
+                        Bitness::Eight => {
+                            let val: u8 = self.get_val(instruction, 1)?;
+                            self.set_val(instruction, 0, val as u64)?;
+                        }
+                        Bitness::Sixteen => {
+                            let val: u16 = self.get_val(instruction, 1)?;
+                            self.set_val(instruction, 0, val as u64)?;
+                        }
+                        Bitness::ThirtyTwo => {
+                            let val: u32 = self.get_val(instruction, 1)?;
+                            self.set_val(instruction, 0, val as u64)?;
+                        }
+                        x => unreachable!("{instruction}, bittnes: {x:?}"),
+                    },
+                    Bitness::HundredTwentyEigth => unreachable!(),
+                },
                 /*
                         +----------------------+
                         | Stack   Instructions |
@@ -1310,7 +1387,11 @@ impl Emu {
                     self.push(self.rflags);
                 }
                 Mnemonic::Rdsspq => {
-                    self.set_val(instruction, 0, self.get_reg::<u64, 8>(Register::RSP))?;
+                    self.set_val(
+                        instruction,
+                        0,
+                        0// self.get_reg::<u64, 8>(Register::RSP)
+                    )?;
                 }
                 /*
                         +-----------------------------+
@@ -1318,7 +1399,7 @@ impl Emu {
                         +-----------------------------+
                 */
                 Mnemonic::Cpuid => {
-                    // pretend we're and old intel cpu
+                    // pretend we're a very old cpu
                     // https://de.wikipedia.org/wiki/CPUID
                     // dbg!();
                     let ax = self.get_reg::<u8, 1>(Register::RAX);
@@ -1386,7 +1467,7 @@ impl Emu {
                             let index: usize = self.get_reg(Register::RCX);
 
                             self.memory
-                                .write_primitive(Virtaddr(index + base_addr), rax_val)?;
+                                .write_primitive(Virtaddr(index * 8 + base_addr), rax_val)?;
                             if self.get_reg::<usize, 8>(Register::RCX) == 0 {
                                 continue 'next_instr;
                             }
@@ -1397,13 +1478,13 @@ impl Emu {
                     }
                 }
                 Mnemonic::Sete => {
-                    self.set_val(instruction, 0, (self.get_flag(Flag::ZF) as u8) * 0xffu8)?;
+                    self.set_val(instruction, 0, self.get_flag(Flag::ZF) as u8)?;
                 }
                 Mnemonic::Setne => {
-                    self.set_val(instruction, 0, (!self.get_flag(Flag::ZF) as u8) * 0xffu8)?;
+                    self.set_val(instruction, 0, !self.get_flag(Flag::ZF) as u8)?;
                 }
                 Mnemonic::Seto => {
-                    self.set_val(instruction, 0, (self.get_flag(Flag::OF) as u8) * 0xffu8)?;
+                    self.set_val(instruction, 0, self.get_flag(Flag::OF) as u8)?;
                 }
                 /*
                         +----------------------+
@@ -1455,8 +1536,8 @@ impl Emu {
                     self.set_val(instruction, 0, val).unwrap();
                 }
                 Mnemonic::Movhps => {
-                    let src: u128 = self.get_val(instruction, 1)?;
-                    self.set_val(instruction, 1, (src >> 64) as u64)?;
+                    let src: u128 = self.get_val::<u64, 8>(instruction, 1)? as u128;
+                    self.set_val(instruction, 1, (src << 64) as u64)?;
                 }
                 Mnemonic::Pshufd => {
                     let imm = instruction.immediate8();
@@ -1488,11 +1569,16 @@ impl Emu {
                     self.set_val(instruction, 0, shuf)?;
                 }
                 Mnemonic::Pxor => {
-                    self.do_loar_op::<u128, u128, _, 16, 16>(
-                        instruction,
-                        core::ops::BitXor::bitxor,
-                    )
-                    .unwrap();
+                    let lhs: u128 = self.get_val(instruction, 0)?;
+                    let rhs: u128 = self.get_val(instruction, 1)?;
+
+                    self.set_val(instruction, 0, lhs ^ rhs)?;
+                }
+                Mnemonic::Pand => {
+                    let lhs: u128 = self.get_val(instruction, 0)?;
+                    let rhs: u128 = self.get_val(instruction, 1)?;
+
+                    self.set_val(instruction, 0, lhs & rhs)?;
                 }
                 Mnemonic::Pcmpeqb => {
                     let lhs: u8x16 =
@@ -1889,7 +1975,7 @@ impl Emu {
                 let address: usize = self.calc_addr(instruction);
                 Ok(self.memory.write_primitive(Virtaddr(address), val)?)
             }
-            _ => unsafe { unreachable!() },
+            _ => unreachable!(),
         }
     }
 
@@ -1924,7 +2010,7 @@ impl Emu {
             // mov    rbx,QWORD PTR fs:0x10
             // ```
             // here fs is the segment register
-            if let Some(seg_reg) = seg_from_iced_seg(mem.memory_segment()) {
+            if let Some(seg_reg) = seg_from_iced_seg(mem.segment_prefix()) {
                 addr = addr.wrapping_add(self.get_seg(seg_reg) as usize);
             }
 
@@ -2046,17 +2132,17 @@ enum Flag {
     /// mask: `1 << 2` Parity flag
     PF = 1 << 2,
     /// mask: `1 << 4` Auxilliary Carry flag
-    AUXCF = 1 << 4,
+    AuxCF = 1 << 4,
     /// mask: `1 << 6` Zero flag
     ZF = 1 << 6,
     /// mask: `1 << 7` Sign flag
     SF = 1 << 7,
-    /// mask: `1 << 8` Trap flag
-    TF = 1 << 8,
-    /// mask: `1 << 9` Interrupt enable flag
-    IEF = 1 << 9,
-    /// mask: `1 << 10` direction flag
-    DF = 1 << 10,
+    // mask: `1 << 8` Trap flag
+    //TF = 1 << 8,
+    // mask: `1 << 9` Interrupt enable flag
+    //IEF = 1 << 9,
+    // mask: `1 << 10` direction flag
+    //DF = 1 << 10,
     /// mask: `1 << 11` overflow flag
     OF = 1 << 11,
 }
@@ -2161,7 +2247,7 @@ pub enum Register {
     DH,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum Bitness {
     Eight = 8,
@@ -2240,16 +2326,15 @@ fn reg_from_iced_reg(reg: iced_x86::Register) -> Option<Register> {
 fn seg_from_iced_seg(reg: iced_x86::Register) -> Option<SegReg> {
     match reg {
         iced_x86::Register::FS => Some(SegReg::Fs),
-        iced_x86::Register::SS => None,
-        iced_x86::Register::DS => None,
+        iced_x86::Register::SS | iced_x86::Register::None | iced_x86::Register::DS => None,
         x => todo!("{x:?} at {:#x}", unsafe { IP }),
     }
 }
 
 #[inline]
-fn bitness(instr: Instruction) -> Bitness {
-    match instr.op0_kind() {
-        OpKind::Register => reg_bitness(instr.op0_register()),
+fn bitness(instr: Instruction, op: u32) -> Bitness {
+    match instr.op_kind(op) {
+        OpKind::Register => reg_bitness(instr.op_register(op)),
         OpKind::NearBranch16 => Bitness::Sixteen,
         OpKind::NearBranch32 => Bitness::ThirtyTwo,
         OpKind::NearBranch64 => Bitness::SixtyFour,
@@ -2278,17 +2363,10 @@ fn bitness(instr: Instruction) -> Bitness {
 fn reg_bitness(reg: iced_x86::Register) -> Bitness {
     match reg {
         // https://stackoverflow.com/questions/1753602/what-are-the-names-of-the-new-x86-64-processors-registers
-        iced_x86::Register::R8D
-        | iced_x86::Register::R9D
-        | iced_x86::Register::R10D
-        | iced_x86::Register::R11D
-        | iced_x86::Register::R12D
-        | iced_x86::Register::R13D
-        | iced_x86::Register::R14D
-        | iced_x86::Register::R15D => Bitness::ThirtyTwo,
         iced_x86::Register::AL
         | iced_x86::Register::R11L
         | iced_x86::Register::R14L
+        | iced_x86::Register::R15L
         | iced_x86::Register::CL
         | iced_x86::Register::DL
         | iced_x86::Register::BL
@@ -2299,8 +2377,8 @@ fn reg_bitness(reg: iced_x86::Register) -> Bitness {
         | iced_x86::Register::SPL
         | iced_x86::Register::BPL
         | iced_x86::Register::SIL
-        | iced_x86::Register::DIL => Bitness::Eight,
-        iced_x86::Register::R10L => Bitness::Eight,
+        | iced_x86::Register::DIL
+        | iced_x86::Register::R10L => Bitness::Eight,
         iced_x86::Register::AX
         | iced_x86::Register::CX
         | iced_x86::Register::DX
@@ -2309,15 +2387,21 @@ fn reg_bitness(reg: iced_x86::Register) -> Bitness {
         | iced_x86::Register::BP
         | iced_x86::Register::SI
         | iced_x86::Register::DI => Bitness::Sixteen,
-        iced_x86::Register::EAX
+        iced_x86::Register::EBP
+        | iced_x86::Register::EAX
+        | iced_x86::Register::EBX
         | iced_x86::Register::ECX
         | iced_x86::Register::EDX
-        | iced_x86::Register::EBX
-        | iced_x86::Register::ESP
-        | iced_x86::Register::EBP
-        | iced_x86::Register::ESI
         | iced_x86::Register::EDI
-        | iced_x86::Register::EIP => Bitness::ThirtyTwo,
+        | iced_x86::Register::ESI
+        | iced_x86::Register::R8D
+        | iced_x86::Register::R9D
+        | iced_x86::Register::R10D
+        | iced_x86::Register::R11D
+        | iced_x86::Register::R12D
+        | iced_x86::Register::R13D
+        | iced_x86::Register::R14D
+        | iced_x86::Register::R15D => Bitness::ThirtyTwo,
         iced_x86::Register::RAX
         | iced_x86::Register::RCX
         | iced_x86::Register::RDX

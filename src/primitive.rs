@@ -67,7 +67,7 @@ macro_rules! impl_primitive {
 
             #[inline(always)]
             fn msb(self) -> bool {
-                ((self & (1 << (8 * $bytes - 1))) > 0)
+                (self >> ((8 * $bytes) - 1)) != 0
             }
         }
     };

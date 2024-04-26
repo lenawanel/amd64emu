@@ -4,11 +4,7 @@
 use core::ops::Range;
 use std::{fmt::Debug, path::Path};
 
-use elf::{
-    endian::{AnyEndian, LittleEndian},
-    parse::ParseAt,
-    ElfBytes,
-};
+use elf::{endian::LittleEndian, ElfBytes};
 
 use crate::{primitive::Primitive, symbol_table::SymbolTable};
 
@@ -100,13 +96,11 @@ impl MMU {
     }
 
     /// write a buffer to a virtual adress
-    #[must_use]
     pub fn write_from(&mut self, addr: Virtaddr, buf: &[u8]) -> Result<()> {
         self.write_from_perms(addr, buf, PERM_WRITE)
     }
 
     /// write a buffer to a virtual adress, checking if we have the given permissions
-    #[must_use]
     pub fn write_from_perms(&mut self, addr: Virtaddr, buf: &[u8], exp_perm: Perm) -> Result<()> {
         #[cfg(feature = "raw_tracking")]
         let mut has_raw = false;
@@ -244,7 +238,7 @@ impl MMU {
     }
 
     /// write a primitive type to memory
-    fn write_primitive_no_check<T: Primitive<BYTES>, const BYTES: usize>(
+    /* fn write_primitive_no_check<T: Primitive<BYTES>, const BYTES: usize>(
         &mut self,
         addr: Virtaddr,
         value: T,
@@ -270,7 +264,7 @@ impl MMU {
         }
 
         Ok(())
-    }
+    }*/
 
     /// Allocate a region of memory as RW in the address space
     /// returns (base, cur_alc)
@@ -386,8 +380,7 @@ impl MMU {
     pub fn get_sym(&self, addr: usize) -> &str {
         self.symbol_table
             .get(&addr)
-            .map(String::as_str)
-            .unwrap_or("<can't resolve>")
+            .map_or("<can't resolve>", String::as_str)
     }
 
     /// load an executable into the mmu to be executed later on
@@ -508,7 +501,6 @@ impl MMU {
 
                     last_loaded_section =
                         std::cmp::max(hdr.p_vaddr + hdr.p_filesz, last_loaded_section);
-
                 }
                 // load the LOAD type sections
                 x => println!("not loading section of type: {x}"),
@@ -518,8 +510,8 @@ impl MMU {
         for shdr in elf.section_headers().unwrap() {
             if let Ok(rels) = elf.section_data_as_relas(&shdr) {
                 for rel in rels {
-                    let sym = sym_tab.get(rel.r_sym as usize).unwrap();
-                    println!("{:#x?}", rel);
+                    // let sym = sym_tab.get(rel.r_sym as usize).unwrap();
+                    println!("{rel:#x?}");
                     // let's pretend we're libc ;)
                     /*match rel.r_type {
                         0x25 => {
@@ -543,14 +535,9 @@ impl MMU {
 
         let stack_end = Virtaddr(last_loaded_section.next_multiple_of(0x1000) as usize);
 
-
         // add the stack
-        self.set_permissions(
-            stack_end,
-            STACK_SIZE,
-            PERM_WRITE | PERM_READ,
-        )
-        .expect("failed to allocate stack");
+        self.set_permissions(stack_end, STACK_SIZE, PERM_WRITE | PERM_READ)
+            .expect("failed to allocate stack");
 
         self.cur_alc = Virtaddr(stack_end.0 + 0x10 + STACK_SIZE);
 
@@ -582,7 +569,7 @@ impl MMU {
 
         // update the dirty blocks
         for block in block_start..=block_end {
-            self.update_dirty(block)
+            self.update_dirty(block);
         }
 
         Ok(())

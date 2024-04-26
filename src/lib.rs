@@ -2,6 +2,7 @@
 #![feature(thread_local)]
 #![feature(bigint_helper_methods)]
 #![feature(debug_closure_helpers)]
+#![allow(clippy::cast_possible_truncation)]
 pub mod emu;
 pub mod mmu;
 pub mod primitive;
@@ -31,7 +32,8 @@ mod tests {
     #[test]
     fn test_cmp_1_0() {
         test_flags_hw(
-            2, "
+            2,
+            "
         mov rax, 1
         cmp rax, 0
         ",
@@ -40,21 +42,25 @@ mod tests {
 
     #[test]
     fn test_cmp_1_11() {
-        test_flags_hw(0, 
+        test_flags_hw(
+            0,
             "mov rax, 1
         cmp rax, 11",
         );
     }
     #[test]
     fn test_sub_1_11() {
-        test_flags_hw(1,&format!(
-            "
+        test_flags_hw(
+            1,
+            &format!(
+                "
         mov rax, {}
         sub rax, {}
         ",
-            u64::MAX - 1,
-            1
-        ));
+                u64::MAX - 1,
+                1
+            ),
+        );
     }
 
     fn test_flags_hw(id: u64, code: &str) {
