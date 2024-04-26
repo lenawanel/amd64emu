@@ -1277,7 +1277,7 @@ impl Emu {
                             }
                             Bitness::Sixteen => {
                                 let val: i16 = self.get_val(instruction, 1)?;
-                                self.set_val(instruction, 0, val as i16)?;
+                                self.set_val(instruction, 0, val)?;
                             }
                             _ => unreachable!(),
                         },
@@ -1292,7 +1292,7 @@ impl Emu {
                             }
                             Bitness::ThirtyTwo => {
                                 let val: i32 = self.get_val(instruction, 1)?;
-                                self.set_val(instruction, 0, val as i32)?;
+                                self.set_val(instruction, 0, val)?;
                             }
                             _ => unreachable!(),
                         },
@@ -1323,7 +1323,7 @@ impl Emu {
                         }
                         Bitness::Sixteen => {
                             let val: u16 = self.get_val(instruction, 1)?;
-                            self.set_val(instruction, 0, val as u16)?;
+                            self.set_val(instruction, 0, val)?;
                         }
                         _ => unreachable!(),
                     },
@@ -1338,7 +1338,7 @@ impl Emu {
                         }
                         Bitness::ThirtyTwo => {
                             let val: u32 = self.get_val(instruction, 1)?;
-                            self.set_val(instruction, 0, val as u32)?;
+                            self.set_val(instruction, 0, val)?;
                         }
                         _ => unreachable!(),
                     },
@@ -1390,7 +1390,7 @@ impl Emu {
                     self.set_val(
                         instruction,
                         0,
-                        0// self.get_reg::<u64, 8>(Register::RSP)
+                        0, // self.get_reg::<u64, 8>(Register::RSP)
                     )?;
                 }
                 /*
